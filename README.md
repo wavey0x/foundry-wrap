@@ -23,7 +23,7 @@ pip install 'fwrap[safe]'
 
 ### Dynamic Interface Generation
 
-In your Foundry script, use the `FW-Interface` directive to automatically generate interfaces:
+In your Foundry script, use the `FW-ICustomName` directive to automatically generate interfaces (where the "ICustomName" portion is whatever you'd like to call it). fwrap will parse your script, and automatically fetch the interface and import it. Interfaces are fetched from etherscan for the address wrapped by the FW- directive, and are cached locally for future usage.
 
 ```solidity
 // SPDX-License-Identifier: MIT
@@ -33,7 +33,7 @@ import {Script} from "forge-std/Script.sol";
 
 contract MyScript is Script {
     function run() public {
-        // FW-IERC20 will be automatically replaced with a valid interface
+        // FW-IERC20 will be automatically replaced with "IERC20", and the contract abi will be used to generate and import a new interface file
         FW-IERC20 token = FW-IERC20(0x6B175474E89094C44Da98b954EedeAC495271d0F); // DAI
         
         vm.startBroadcast();
