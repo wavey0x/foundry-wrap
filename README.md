@@ -1,112 +1,116 @@
-# fwrap - Foundry Script Wrapper
+# foundry-wrap
 
-**fwrap is a Python wrapper for Foundry forge scripts with dynamic interface generation and Safe transaction support.**
+A Python wrapper for Foundry's forge scripts with dynamic interface generation and Safe transaction support.
 
 ## Features
 
-- **Dynamic Interface Generation**: Automatically generate Solidity interfaces by using special `FW-Interface` directives in your scripts
-- **Safe Transaction Integration**: Create and submit Gnosis Safe multisig transactions directly from forge script outputs
-- **Interface Caching**: Both local (project-specific) and global caching of interfaces for faster development
-- **Etherscan Integration**: Fallback to downloading ABIs from Etherscan when necessary
+- Dynamic interface generation for Foundry scripts
+- Create and sign Safe transactions from Foundry scripts
+- Cache and manage interfaces for reuse
 
-## Installation
+## Installation & Usage
 
-```shell
-# Install from PyPI
-pip install fwrap
+### Using with UV (Recommended)
 
-# Or install with Safe transaction support
-pip install 'fwrap[safe]'
+Using foundry-wrap with [Astral's uv](https://github.com/astral-sh/uv) is the most convenient way to run it:
+
+```bash
+# Install uv if you don't have it
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Run foundry-wrap commands directly
+uvx foundry-wrap --help
+uvx foundry-wrap safe path/to/Script.s.sol
 ```
 
-## Usage
+This creates a temporary isolated environment with all dependencies installed.
 
-### Dynamic Interface Generation
+## Commands
 
-In your Foundry script, use the `FW-ICustomName` directive to automatically generate interfaces (where the "ICustomName" portion is whatever you'd like to call it). fwrap will parse your script, and automatically fetch the interface and import it. Interfaces are fetched from etherscan for the address wrapped by the FW- directive, and are cached locally for future usage.
-
-```solidity
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.13;
-
-import {Script} from "forge-std/Script.sol";
-
-contract MyScript is Script {
-    function run() public {
-        // FW-IERC20 will be automatically replaced with "IERC20", and the contract abi will be used to generate and import a new interface file
-        FW-IERC20 token = FW-IERC20(0x6B175474E89094C44Da98b954EedeAC495271d0F); // DAI
-        
-        vm.startBroadcast();
-        uint256 balance = token.balanceOf(msg.sender);
-        vm.stopBroadcast();
-    }
-}
-```
-
-Then run the script with fwrap:
-
-```shell
-fwrap run script/MyScript.s.sol
-```
-
-### Safe Transaction Creation
-
-Create and propose Gnosis Safe transactions directly from your Foundry scripts:
-
-```shell
-# Configure Safe settings
-fwrap config --global --safe-address YOUR_SAFE_ADDRESS --safe-proposer YOUR_ADDRESS --rpc-url YOUR_RPC_URL
-
-# Create and propose a Safe transaction from a script
-fwrap safe script/MyScript.s.sol
-```
-
-### Interface Management
-
-```shell
-# List all cached interfaces
-fwrap list
-
-# Clear the global interface cache
-fwrap clear-cache
-```
+- `uvx foundry-wrap run SCRIPT`: Process a script and handle interface generation
+- `uvx foundry-wrap safe SCRIPT`: Process a script and create/submit a Safe transaction
+- `uvx foundry-wrap list`: List all cached interfaces
+- `uvx foundry-wrap clear-cache`: Clear the interface cache
+- `uvx foundry-wrap config`: Display and edit configuration
 
 ## Configuration
 
-Create a global configuration:
+foundry-wrap uses a multi-level configuration system with the following priority (highest to lowest):
 
-```shell
-fwrap config --global --interfaces-path ./my-interfaces --rpc-url https://mainnet.infura.io/v3/YOUR_KEY
+1. Command-line arguments
+2. Environment variables (prefixed with `FOUNDRY_WRAP_`)
+3. Project-local config file (`./foundry-wrap.toml`)
+4. Global config file (`~/.foundry-wrap/config.toml`)
+
+### Global Configuration
+
+The global configuration is created automatically on first run and stored at `~/.foundry-wrap/config.toml`. You can view your current global configuration:
+
+```bash
+uvx foundry-wrap config
 ```
 
-Or use project-specific configuration:
+You can also edit the global config file directly:
 
-```shell
-fwrap config --interfaces-path ./interfaces
+```toml
+# ~/.foundry-wrap/config.toml
+[foundry]
+interfaces_path = "~/.foundry-wrap/interfaces"
+rpc_url = "https://eth-mainnet.g.alchemy.com/v2/YOUR_API_KEY"
+
+[safe]
+safe_address = "0x1234...5678"
+safe_proposer = "0xabcd...ef01"
+chain_id = 1
 ```
 
-## Environment Variables
+### Project-Local Configuration
 
-You can use these environment variables instead of configuration:
+For project-specific settings, you can use the `config set` command to create or update a project-level configuration:
 
-- `RPC_URL` - Default RPC URL
-- `SAFE_ADDRESS` - Default Safe address
-- `SAFE_PROPOSER` - Default Safe proposer address
-- `ETHERSCAN_API_KEY` - API key for Etherscan interface generation
-- `CHAIN_ID` - Chain ID for Safe transaction service (default: 1)
+```bash
+# Set project-level configuration values
+uvx foundry-wrap config set safe.safe_address 0x1234...5678
+uvx foundry-wrap config set safe.chain_id 1
+uvx foundry-wrap config set foundry.rpc_url https://eth-mainnet.g.alchemy.com/v2/YOUR_API_KEY
+```
+
+This will create or update a `foundry-wrap.toml` file in your current directory:
+
+```toml
+# foundry-wrap.toml
+[foundry]
+rpc_url = "https://eth-mainnet.g.alchemy.com/v2/YOUR_API_KEY"
+
+[safe]
+safe_address = "0x1234...5678"
+chain_id = 1
+```
+
+### Common Settings
+
+Most projects will want to configure these settings:
+
+- `safe.safe_address`: The address of your Safe
+- `safe.safe_proposer`: Your EOA address that will propose transactions
+- `safe.chain_id`: The chain ID (1 for Mainnet, 5 for Goerli, etc.)
+- `foundry.rpc_url`: The RPC endpoint for Ethereum interactions
+- `foundry.interfaces_path`: Path to store cached interfaces
+
+### Environment Variables
+
+All settings can be overridden with environment variables prefixed with `FOUNDRY_WRAP_`, for example:
+
+```bash
+export FOUNDRY_WRAP_RPC_URL="https://eth-mainnet.g.alchemy.com/v2/YOUR_API_KEY"
+export FOUNDRY_WRAP_SAFE_ADDRESS="0x1234...5678"
+```
 
 ## Requirements
 
 - Python 3.8+
-- Foundry (Forge, Cast)
-
-## How It Works
-
-1. fwrap scans your script for `FW-Interface` directives
-2. It generates interfaces using Cast or Etherscan
-3. It updates your script with proper imports and interface references
-4. When using the Safe features, it runs your script and batches all transactions through the MultiSend contract
+- For Safe features: web3, safe-eth-py, and other Ethereum-related packages
 
 ## License
 
-MIT
+[MIT License](LICENSE)

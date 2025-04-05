@@ -1,4 +1,4 @@
-"""Interface management for fwrap."""
+"""Interface management for foundry-wrap."""
 
 import json
 import subprocess
@@ -6,33 +6,54 @@ import os
 import shutil
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional, Tuple, Any, List
+from typing import Dict, Optional, Tuple, Any, List, Union
 import requests
 import tempfile
 import re
 
 from rich.console import Console
+from foundry_wrap.settings import FoundryWrapSettings
 
 console = Console()
 
 class InterfaceManager:
     """Manages Ethereum contract interfaces for Foundry scripts."""
     
-    def __init__(self, config: Dict[str, Any]):
-        """Initialize with configuration options."""
+    def __init__(self, settings: Union[FoundryWrapSettings, Dict[str, Any]]):
+        """
+        Initialize with settings.
+        
+        Args:
+            settings: Either a FoundryWrapSettings instance or a dictionary for backward compatibility
+        """
+        # Convert dictionary to settings if needed (backward compatibility)
+        if isinstance(settings, dict):
+            # Create a configuration dictionary from the legacy format
+            config_dict = {}
+            # Map the old dictionary format to our new nested structure
+            if "interfaces" in settings:
+                config_dict["interfaces"] = settings["interfaces"]
+            if "api_keys" in settings and "etherscan" in settings["api_keys"]:
+                config_dict["etherscan"] = {"api_key": settings["api_keys"]["etherscan"]}
+            # Create a settings object
+            from foundry_wrap.settings import FoundryWrapSettings
+            self.settings = FoundryWrapSettings(**config_dict)
+        else:
+            self.settings = settings
+        
         # Local interfaces path (relative to project)
-        self.local_path = Path(config.get("interfaces", {}).get("local_path", "interfaces"))
+        self.local_path = Path(self.settings.interfaces.local_path)
         self.local_path.mkdir(exist_ok=True)
         
         # Global interfaces path
-        default_global_path = Path.home() / ".config" / "fwrap" / "interfaces"
-        self.global_path = Path(config.get("interfaces", {}).get("global_path", default_global_path))
+        self.global_path = Path(self.settings.interfaces.global_path)
         self.global_path.mkdir(parents=True, exist_ok=True)
         
         # API keys for contract explorers
-        self.etherscan_api_key = config.get("api_keys", {}).get(
-            "etherscan", os.environ.get("ETHERSCAN_API_KEY", "")
-        )
+        self.etherscan_api_key = self.settings.etherscan.api_key
+        
+        # Store the entire config for config-dependent methods
+        self.config = self.settings.model_dump() if hasattr(self.settings, 'model_dump') else settings
         
         # Temporary directory for downloaded files
         self.temp_dir = Path(tempfile.mkdtemp())
@@ -284,7 +305,7 @@ interface {interface_name} {{
         local_path, global_path = self._get_interface_paths(interface_name)
         
         # Check if file exists and handle overwrite
-        if global_path.exists() and not self.config.get("interfaces", {}).get("overwrite", False):
+        if global_path.exists() and not self.settings.interfaces.overwrite:
             if not console.input(f"Interface '{interface_name}.sol' already exists globally. Overwrite? (y/N) ").lower().startswith("y"):
                 # Instead of raising an error, copy the existing interface to the local project
                 console.print(f"[yellow]Using existing interface {interface_name} from global cache[/yellow]")

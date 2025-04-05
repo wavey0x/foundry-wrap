@@ -1,4 +1,4 @@
-"""Command-line interface for fwrap."""
+"""Command-line interface for foundry-wrap."""
 
 import os
 import sys
@@ -10,13 +10,20 @@ from rich.console import Console
 from rich.panel import Panel
 import toml
 
-from .config import load_config, GLOBAL_CONFIG_PATH, create_default_global_config
-from .interface_manager import InterfaceManager
-from .script_parser import ScriptParser
+from foundry_wrap.settings import (
+    GLOBAL_CONFIG_PATH, 
+    create_default_global_config,
+    load_settings,
+    FoundryWrapSettings
+)
+from foundry_wrap.interface_manager import InterfaceManager
+from foundry_wrap.script_parser import ScriptParser
+from foundry_wrap.version import __version__ as VERSION
 
 console = Console()
 
 @click.group()
+@click.version_option(VERSION, prog_name="foundry-wrap")
 @click.option("--verbose", "-v", is_flag=True, help="Enable verbose output")
 @click.option("--config", "-c", type=click.Path(exists=True), help="Path to config file")
 @click.option("--interfaces-path", type=str, help="Local path for storing interfaces")
@@ -35,8 +42,11 @@ def cli(ctx: click.Context, verbose: bool, config: Optional[str],
     if rpc_url:
         cli_options["rpc.url"] = rpc_url
     
-    # Load config with potential CLI overrides
-    ctx.obj["config"] = load_config(config, cli_options)
+    # Load settings with potential CLI overrides
+    settings = load_settings(config, cli_options)
+    ctx.obj["settings"] = settings
+    # For backward compatibility
+    ctx.obj["config"] = settings.model_dump(mode="python")
 
 @cli.command()
 @click.argument("script", type=click.Path(exists=True))
@@ -48,7 +58,7 @@ def run(ctx: click.Context, script: str, dry_run: bool, clean: bool) -> None:
     try:
         script_path = Path(script)
         parser = ScriptParser(script_path)
-        interface_manager = InterfaceManager(ctx.obj["config"])
+        interface_manager = InterfaceManager(ctx.obj["settings"])
 
         if clean:
             parser.clean_interfaces()
@@ -80,7 +90,7 @@ def run(ctx: click.Context, script: str, dry_run: bool, clean: bool) -> None:
 @click.pass_context
 def list(ctx: click.Context) -> None:
     """List all cached interfaces."""
-    interface_manager = InterfaceManager(ctx.obj["config"])
+    interface_manager = InterfaceManager(ctx.obj["settings"])
     cached = interface_manager.list_cached_interfaces()
     
     if not cached:
@@ -98,7 +108,7 @@ def list(ctx: click.Context) -> None:
 @click.pass_context
 def clear_cache(ctx: click.Context, confirm: bool) -> None:
     """Clear the global interface cache."""
-    interface_manager = InterfaceManager(ctx.obj["config"])
+    interface_manager = InterfaceManager(ctx.obj["settings"])
     
     # Show what will be deleted
     cached = interface_manager.list_cached_interfaces()
@@ -134,7 +144,7 @@ def clear_cache(ctx: click.Context, confirm: bool) -> None:
 def config(ctx: click.Context, global_config: bool, interfaces_path: Optional[str], 
            global_interfaces_path: Optional[str], safe_address: Optional[str],
            safe_proposer: Optional[str], rpc_url: Optional[str]) -> None:
-    """Configure fwrap settings."""
+    """Configure foundry-wrap settings."""
     if global_config:
         # Make sure global config exists
         if not GLOBAL_CONFIG_PATH.exists():
@@ -144,15 +154,17 @@ def config(ctx: click.Context, global_config: bool, interfaces_path: Optional[st
         console.print(f"Editing global config at [blue]{config_path}[/blue]")
     else:
         # Project config
-        config_path = Path(".fwrap.toml")
+        config_path = Path(".foundry-wrap.toml")
         if not config_path.exists():
-            # Create a default project config
+            # Create a default project config using a subset of settings
+            settings = FoundryWrapSettings()
+            config_data = {
+                "interfaces": {
+                    "local_path": settings.interfaces.local_path,
+                }
+            }
             with open(config_path, "w") as f:
-                toml.dump({
-                    "interfaces": {
-                        "local_path": "interfaces",
-                    }
-                }, f)
+                toml.dump(config_data, f)
             console.print(f"Created project config at [blue]{config_path}[/blue]")
     
     # Update specific settings if provided
@@ -205,14 +217,13 @@ def config(ctx: click.Context, global_config: bool, interfaces_path: Optional[st
 @click.option("--account", help="The account to use for signing")
 @click.option("--password", help="Password for the account")
 @click.option("--safe-address", help="Safe address to use (overrides config)")
-@click.option("--sender-address", help="Address that will be shown as the transaction sender (overrides config)")
 @click.option("--rpc-url", help="RPC URL to use (overrides config)")
 @click.option("--dry-run", is_flag=True, help="Generate the transaction but do not submit it")
 @click.option("--clean", is_flag=True, help="Remove injected interfaces after execution")
 @click.option("--verbose", "-v", is_flag=True, help="Enable verbose output")
 @click.pass_context
 def safe(ctx: click.Context, script: str, account: str, password: str, 
-         safe_address: str, sender_address: str, rpc_url: str, dry_run: bool, clean: bool, verbose: bool) -> None:
+         safe_address: str, rpc_url: str, dry_run: bool, clean: bool, verbose: bool) -> None:
     """Process a script and create/submit a Safe transaction."""
     try:
         # First, process FW-INTERFACE directives in the script
@@ -236,7 +247,7 @@ def safe(ctx: click.Context, script: str, account: str, password: str,
         # Process each interface if any were found
         if interfaces:
             console.print(f"Processing {len(interfaces)} interfaces in the script...")
-            interface_manager = InterfaceManager(ctx.obj["config"])
+            interface_manager = InterfaceManager(ctx.obj["settings"])
             
             for interface_name, address in interfaces.items():
                 console.print(f"Processing interface {interface_name} for address {address}...")
@@ -254,90 +265,89 @@ def safe(ctx: click.Context, script: str, account: str, password: str,
         else:
             console.print("[yellow]No interfaces found in the script.[/yellow]")
         
-        # Continue with safe command execution
-        from .safe import fwrap_safe_command
+        # Try to import safe functionality 
+        from foundry_wrap.safe import foundry_wrap_safe_command
+    except ImportError as e:
+        # Clean error message for missing dependencies
+        console.print(f"[red]Error:[/red] Safe functionality is required but not available.")
+        console.print("This application requires safe-eth-py and related dependencies.")
+        console.print("\nTo use foundry-wrap with uvx:")
+        console.print("    uvx foundry-wrap [command] [options]")
+        console.print("\nOr install with safe dependencies:")
+        console.print("    pip install 'foundry-wrap[safe]'")
+        console.print(f"\nError details: {str(e)}")
+        sys.exit(1)
+
+    # Use settings values if available
+    settings = ctx.obj["settings"]
+    rpc_url = rpc_url or settings.rpc.url
+    safe_address = safe_address or settings.safe.safe_address
+    
+    # Check required parameters
+    missing_params = []
+    if not rpc_url:
+        missing_params.append("RPC URL")
+    if not safe_address:
+        missing_params.append("Safe address")
         
-        # Use config values if available
-        config = ctx.obj["config"]
-        rpc_url = rpc_url or config.get("rpc", {}).get("url")
-        safe_address = safe_address or config.get("safe", {}).get("safe_address")
-        sender_address = sender_address or config.get("safe", {}).get("safe_proposer")
+    if missing_params:
+        console.print(f"[red]Error:[/red] Missing required parameters: {', '.join(missing_params)}")
+        console.print(f"You can set these values in your global config at [blue]{GLOBAL_CONFIG_PATH}[/blue]")
+        console.print("Run the following command to configure:")
         
-        # Check required parameters
-        missing_params = []
-        if not rpc_url:
-            missing_params.append("RPC URL")
-        if not safe_address:
-            missing_params.append("Safe address")
-        if not sender_address:
-            missing_params.append("Safe proposer address")
+        cmd_parts = ["foundry-wrap config --global"]
+        if "RPC URL" in missing_params:
+            cmd_parts.append("--rpc-url <YOUR_RPC_URL>")
+        if "Safe address" in missing_params:
+            cmd_parts.append("--safe-address <YOUR_SAFE_ADDRESS>")
+        if "Safe proposer address" in missing_params:
+            cmd_parts.append("--safe-proposer <YOUR_ADDRESS>")
             
-        if missing_params:
-            console.print(f"[red]Error:[/red] Missing required parameters: {', '.join(missing_params)}")
-            console.print(f"You can set these values in your global config at [blue]{GLOBAL_CONFIG_PATH}[/blue]")
-            console.print("Run the following command to configure:")
-            
-            cmd_parts = ["fwrap config --global"]
-            if "RPC URL" in missing_params:
-                cmd_parts.append("--rpc-url <YOUR_RPC_URL>")
-            if "Safe address" in missing_params:
-                cmd_parts.append("--safe-address <YOUR_SAFE_ADDRESS>")
-            if "Safe proposer address" in missing_params:
-                cmd_parts.append("--safe-proposer <YOUR_ADDRESS>")
-                
-            console.print(f"  [green]{' '.join(cmd_parts)}[/green]")
-            
-            # If interfaces were injected, clean them up on error
-            if interfaces and clean:
-                parser.clean_interfaces()
-                console.print("[yellow]Interfaces cleaned from script.[/yellow]")
-                
-            sys.exit(1)
+        console.print(f"  [green]{' '.join(cmd_parts)}[/green]")
         
-        # Execute safe command
-        console.print(f"Running forge script with RPC URL: {rpc_url}")
-        success, tx_hash, error = fwrap_safe_command(
-            script_path=str(script_path),
-            project_dir=None,  # Use current directory
-            account=account,
-            password=password,
-            rpc_url=rpc_url,
-            safe_address=safe_address,
-            sender_address=sender_address,
-            dry_run=dry_run
-        )
-        
-        # If requested, clean up the injected interfaces
+        # If interfaces were injected, clean them up on error
         if interfaces and clean:
             parser.clean_interfaces()
             console.print("[yellow]Interfaces cleaned from script.[/yellow]")
-        
-        if success:
-            console.print(f"[green]Safe transaction created successfully![/green]")
-            console.print(f"Transaction hash: [bold]{tx_hash}[/bold]")
-            if dry_run:
-                console.print("[yellow]Dry run - transaction not submitted[/yellow]")
-        else:
-            console.print(f"[red]Error:[/red] {error}")
             
-            # If interfaces were injected but command failed, clean them up
-            if interfaces and clean:
-                parser.clean_interfaces()
-                console.print("[yellow]Interfaces cleaned from script.[/yellow]")
-                
-            sys.exit(1)
-            
-    except ImportError:
-        console.print("[red]Error:[/red] Safe dependencies not installed")
-        console.print("Install with: pip install 'fwrap[safe]'")
         sys.exit(1)
-    except Exception as e:
-        console.print(f"[red]Error in safe command:[/red] {str(e)}")
-        if verbose:
-            import traceback
-            console.print(traceback.format_exc())
+    
+    # Execute safe command
+    console.print(f"Running forge script with RPC URL: {rpc_url}")
+    success, tx_hash, error = foundry_wrap_safe_command(
+        script_path=str(script_path),
+        project_dir=None,  # Use current directory
+        account=account,
+        password=password,
+        rpc_url=rpc_url,
+        safe_address=safe_address,
+        dry_run=dry_run
+    )
+    
+    # If requested, clean up the injected interfaces
+    if interfaces and clean:
+        parser.clean_interfaces()
+        console.print("[yellow]Interfaces cleaned from script.[/yellow]")
+    
+    if success:
+        console.print(f"[green]Safe transaction created successfully![/green]")
+        console.print(f"Transaction hash: [bold]{tx_hash}[/bold]")
+        if dry_run:
+            console.print("[yellow]Dry run - transaction not submitted[/yellow]")
+    else:
+        console.print(f"[red]Error:[/red] {error}")
+        
+        # If interfaces were injected but command failed, clean them up
+        if interfaces and clean:
+            parser.clean_interfaces()
+            console.print("[yellow]Interfaces cleaned from script.[/yellow]")
+            
         sys.exit(1)
 
 def main():
     """Entry point for the CLI."""
+    # Ensure global config exists
+    if not GLOBAL_CONFIG_PATH.exists():
+        create_default_global_config()
+        
     cli(obj={}) 

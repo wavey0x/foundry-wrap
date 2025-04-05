@@ -1,0 +1,4 @@
+[app]
+name = "foundry-wrap"
+version = "0.1.0"
+entry_point = "foundry_wrap.__main__:main"

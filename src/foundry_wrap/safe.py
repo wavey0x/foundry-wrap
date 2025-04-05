@@ -1,5 +1,5 @@
 """
-Safe Transaction Management for fwrap
+Safe Transaction Management for foundry-wrap
 
 This module provides functionality to create and sign Gnosis Safe transactions
 from Foundry forge script executions.
@@ -16,16 +16,16 @@ from asyncio.subprocess import Process
 import requests
 import argparse
 from eth_hash.auto import keccak
-from gnosis.safe import Safe
-from gnosis.eth import EthereumClient
-from gnosis.safe.safe import SafeV111, SafeV120, SafeV130, SafeV141
-from gnosis.safe.enums import SafeOperationEnum
-from gnosis.safe.multi_send import MultiSend, MultiSendOperation, MultiSendTx
-from gnosis.safe.safe_tx import SafeTx
-from gnosis.safe.signatures import signature_split, signature_to_bytes
-from gnosis.safe.api import TransactionServiceApi
-from gnosis.safe.safe_signature import SafeSignature
-from .config import GLOBAL_CONFIG_PATH
+from safe_eth.safe import Safe
+from safe_eth.eth import EthereumClient
+from safe_eth.safe.safe import SafeV111, SafeV120, SafeV130, SafeV141
+from safe_eth.safe.enums import SafeOperationEnum
+from safe_eth.safe.multi_send import MultiSend, MultiSendOperation, MultiSendTx
+from safe_eth.safe.safe_tx import SafeTx
+from safe_eth.safe.signatures import signature_split, signature_to_bytes
+from safe_eth.safe.api import TransactionServiceApi
+from safe_eth.safe.safe_signature import SafeSignature
+from foundry_wrap.settings import GLOBAL_CONFIG_PATH, FoundryWrapSettings
 from rich.console import Console
 
 # Create a console instance at the module level
@@ -146,6 +146,8 @@ class SafeTransactionBuilder:
         txs = []
         for tx in forge_output["transactions"]:
             # Skip transactions to the console logger
+            if not 'to' in tx['transaction']:
+                raise ValueError("Cannot create Safe transaction: Missing 'to' field. Safes cannot deploy contracts.")
             if tx['transaction']['to'].lower() == '0x000000000000000000636f6e736f6c652e6c6f67':
                 continue
                 
@@ -177,7 +179,7 @@ class SafeTransactionBuilder:
         
         return safe_tx
 
-    def safe_tx_to_json(self, sender: str, safe_tx: SafeTx, signature: str = "") -> Dict[str, Any]:
+    def safe_tx_to_json(self, signer_address: str, safe_tx: SafeTx, signature: str = "") -> Dict[str, Any]:
         """
         Convert a SafeTx to the JSON format expected by the Safe API
         """
@@ -189,18 +191,18 @@ class SafeTransactionBuilder:
             'safe': self.safe_address,
             'to': safe_tx.to,
             'value': str(safe_tx.value),
-            'data': safe_tx.data.hex(),
+            'data': '0x' + safe_tx.data.hex().replace('0x', ''),
             'operation': safe_tx.operation,
             'gasToken': safe_tx.gas_token,
             'safeTxGas': str(safe_tx.safe_tx_gas),
             'baseGas': str(safe_tx.base_gas),
             'gasPrice': str(safe_tx.gas_price),
-            'safeTxHash': safe_tx.safe_tx_hash.hex(),
+            'safeTxHash': '0x' + safe_tx.safe_tx_hash.hex().replace('0x', ''),
             'refundReceiver': safe_tx.refund_receiver,
             'nonce': str(safe_tx.safe_nonce),
-            'sender': sender,
+            'sender': signer_address,
             'signature': signature,
-            'origin': 'fwrap-safe-script'
+            'origin': 'foundry-wrap-safe-script'
         }
 
 def fetch_next_nonce(safe_address: str) -> int:
@@ -249,19 +251,16 @@ def checksum_address(address: str) -> str:
     
     return checksum_addr
 
-def sign_tx(safe_tx: SafeTx, account: str = None, password: str = None) -> str:
+def sign_tx(safe_tx: SafeTx, signer: str = None, password: str = None) -> str:
     """Sign a Safe transaction using cast wallet sign"""
-    tx_hash_hex = safe_tx.safe_tx_hash.hex()
-    print(f"Signing data: {tx_hash_hex}")
-    
+    tx_hash_hex = safe_tx.safe_tx_hash.hex()    
     cmd = ["cast", "wallet", "sign"]
-    if account:
-        cmd.extend(["--account", account])
+    if signer:
+        cmd.extend(["--account", signer])
     if password:
         cmd.extend(["--password", password])
     cmd.extend([f"{tx_hash_hex}", "--no-hash"])
-    
-    console.print(f"[yellow]Signing transaction with command: {' '.join(cmd)}[/yellow]")
+    # console.print(f"[yellow]Signing transaction with command: {' '.join(cmd)}[/yellow]")
     try:
         result = subprocess.run(
             cmd,
@@ -338,7 +337,7 @@ def select_wallet() -> Tuple[str, str]:
         # Get user selection
         while True:
             try:
-                selection = console.input("\nSelect a wallet (number): ")
+                selection = console.input("\nSelect a wallet to sign with: ")
                 index = int(selection) - 1
                 if 0 <= index < len(wallets):
                     return wallets[index], wallet_addresses[index]
@@ -346,7 +345,7 @@ def select_wallet() -> Tuple[str, str]:
                     console.print(f"[red]Invalid selection. Please enter a number between 1 and {len(wallets)}.[/red]")
             except ValueError:
                 console.print("[red]Please enter a valid number.[/red]")
-    
+        get_signer_address()
     except subprocess.CalledProcessError as e:
         console.print(f"[red]Error listing wallets: {e.stderr}[/red]")
         raise
@@ -381,11 +380,95 @@ def submit_safe_tx(tx_json: Dict[str, Any]) -> Dict[str, Any]:
     headers = {'Content-Type': 'application/json'}
     
     try:
+        print("Submitting transaction to Safe API...")
+        
         response = requests.post(url, headers=headers, json=tx_json)
-        response.raise_for_status()
+        
+        # Don't raise exception yet to capture error response
+        if response.status_code >= 400:
+            print(f"Error response ({response.status_code}):")
+            print(f"Response headers: {dict(response.headers)}")
+            try:
+                error_details = response.json()
+                print(f"Error details: {json.dumps(error_details, indent=2)}")
+            except:
+                print(f"Raw response: {response.text}")
+            response.raise_for_status()  # Now raise the exception
         return response.json()
     except Exception as e:
+        print(f"Exception details: {type(e).__name__}: {str(e)}")
         raise Exception(f'Error submitting transaction: {str(e)}')
+
+def process_safe_transaction(
+    script_path: str,
+    rpc_url: str,
+    safe_address: str,
+    project_dir: str = None,
+    nonce: int = None,
+    password: str = None,
+    chain_id: str = "1",
+    dry_run: bool = False,
+    broadcast_file: str = None,
+    debug_mode: bool = False
+) -> Tuple[bool, Optional[str], Optional[str]]:
+    """
+    Core implementation of Safe transaction processing logic.
+    Returns (success, tx_hash, error_message)
+    """
+    try:
+        # Set environment variables for the API
+        os.environ["CHAIN_ID"] = chain_id
+        
+        # Initialize our classes
+        forge_runner = ForgeScriptRunner(rpc_url, project_dir or os.getcwd())
+        safe_builder = SafeTransactionBuilder(safe_address, rpc_url)
+        
+        # Get transaction data
+        if debug_mode:
+            if not broadcast_file:
+                # Try to find the latest broadcast file
+                script_name = Path(script_path).name
+                broadcast_file = Path(project_dir or os.getcwd()) / "broadcast" / script_name / "1" / "dry-run" / "run-latest.json"
+                if not broadcast_file.exists():
+                    return False, None, f"No broadcast file found at {broadcast_file}"
+            else:
+                broadcast_file = Path(broadcast_file)
+                if not broadcast_file.exists():
+                    return False, None, f"Broadcast file not found: {broadcast_file}"
+            
+            with open(broadcast_file) as f:
+                json_data = json.load(f)
+                success = True
+        else:
+            # Run forge script normally
+            success, json_data, error = forge_runner.run_forge_script(script_path)
+            if not success:
+                return False, None, f"Error running forge script: {error}"
+        
+        # Build Safe transaction
+        safe_tx = safe_builder.build_safe_tx(json_data, nonce)
+        
+        # Sign if account provided or select wallet
+        signature = ""
+        account_name, signer_address = select_wallet()
+        signature = sign_tx(safe_tx, account_name, password)
+        console.print(f"[yellow]Enter password again to get signer address[/yellow]")
+        signer_address = get_signer_address(account_name, password)
+        
+        # Create the transaction JSON
+        tx_json = safe_builder.safe_tx_to_json(signer_address, safe_tx, signature=signature)
+        
+        # Format transaction hash
+        tx_hash = safe_tx.safe_tx_hash.hex()
+        
+        # Submit the transaction unless dry run
+        if not dry_run and signature:
+            submit_safe_tx(tx_json)
+            
+        return True, tx_hash, tx_json
+        
+    except Exception as e:
+        return False, None, str(e)
 
 def main():
     """Main entry point for the CLI"""
@@ -413,11 +496,7 @@ def main():
     # Get environment variables or use args
     rpc_url = args.rpc_url or os.getenv("RPC_URL")
     safe_address = args.safe_address or os.getenv("SAFE_ADDRESS")
-    sender_address = args.sender_address or os.getenv("SAFE_PROPOSER")
     chain_id = args.chain_id or os.getenv("CHAIN_ID", "1")
-    
-    # Set environment variables for the API
-    os.environ["CHAIN_ID"] = chain_id
     
     # Validate required parameters
     if not rpc_url:
@@ -428,137 +507,112 @@ def main():
         print("Error: SAFE_ADDRESS environment variable or --safe-address not set")
         return 1
     
-    if not sender_address:
-        print("Error: SAFE_PROPOSER environment variable or --sender-address not set")
-        return 1
-    
-    # Initialize our classes
-    forge_runner = ForgeScriptRunner(rpc_url, args.project_dir)
-    safe_builder = SafeTransactionBuilder(safe_address, rpc_url)
-    
-    # Get transaction data
-    if args.debug:
-        if not args.broadcast_file:
-            # Try to find the latest broadcast file
-            script_name = Path(script_path).name
-            broadcast_file = Path(args.project_dir) / "broadcast" / script_name / "1" / "dry-run" / "run-latest.json"
-            if not broadcast_file.exists():
-                print(f"Error: No broadcast file found at {broadcast_file}")
-                print("Please specify --broadcast-file or run without --debug")
-                return 1
-        else:
-            broadcast_file = Path(args.broadcast_file)
-            if not broadcast_file.exists():
-                print(f"Error: Broadcast file not found: {broadcast_file}")
-                return 1
-        
-        print(f"Reading from broadcast file: {broadcast_file}")
-        with open(broadcast_file) as f:
-            json_data = json.load(f)
-            success = True
-    else:
-        # Run forge script normally
-        success, json_data, error = forge_runner.run_forge_script(script_path)
-        if not success:
-            print(f"Error: {error}")
-            return 1
-    
     try:
-        # Build Safe transaction
-        safe_tx = safe_builder.build_safe_tx(json_data, args.nonce)
+        # Process the transaction
+        success, tx_hash, result = process_safe_transaction(
+            script_path=script_path,
+            rpc_url=rpc_url,
+            safe_address=safe_address,
+            project_dir=args.project_dir,
+            nonce=args.nonce,
+            password=args.password,
+            chain_id=chain_id,
+            dry_run=args.dry_run,
+            broadcast_file=args.broadcast_file,
+            debug_mode=args.debug
+        )
         
-        # Sign the transaction if an account is provided
-        signature = ""
-        if args.account:
-            signature = sign_tx(safe_tx, args.account, args.password)
-        
-        # Create the transaction JSON
-        tx_json = safe_builder.safe_tx_to_json(sender_address, safe_tx, signature=signature)
-        
-        # Print the transaction
-        print("\nSafe Transaction:")
-        print(json.dumps(tx_json, indent=2))
-        
-        # Submit the transaction unless dry run
-        if not args.dry_run:
-            if signature:
-                result = submit_safe_tx(tx_json)
-                print(f"\nTransaction submitted successfully with nonce {safe_tx.safe_nonce}")
-                print(f"Safe transaction hash: {safe_tx.safe_tx_hash.hex()}")
-                return 0
-            else:
-                print("\nNo signature provided, transaction not submitted")
-                print(f"Safe transaction hash: {safe_tx.safe_tx_hash.hex()}")
-                return 0
-        else:
-            print("\nDry run, transaction not submitted")
-            print(f"Safe transaction hash: {safe_tx.safe_tx_hash.hex()}")
+        if success:
             return 0
+        else:
+            print(f"Error: {result}")
+            return 1
             
     except Exception as e:
         print(f"Error: {str(e)}")
         return 1
 
-def fwrap_safe_command(script_path: str, project_dir: str = None, account: str = None, 
-                      password: str = None, rpc_url: str = None, safe_address: str = None,
-                      sender_address: str = None, dry_run: bool = False):
+def foundry_wrap_safe_command(script_path: str, project_dir: str = None, account: str = None, 
+                      password: str = None, rpc_url: str = None, safe_address: str = None, dry_run: bool = False):
     """
-    Integration function for fwrap to use safe functionality programmatically.
+    Integration function for foundry-wrap to use safe functionality programmatically.
     Returns a tuple of (success, tx_hash, error_message)
     """
     try:
         # Ensure we have the required parameters
         rpc_url = rpc_url or os.getenv("RPC_URL")
         safe_address = safe_address or os.getenv("SAFE_ADDRESS")
-        sender_address = sender_address or os.getenv("SAFE_PROPOSER")
         
-        if not rpc_url or not safe_address or not sender_address:
+        if not rpc_url or not safe_address:
             missing = []
             if not rpc_url:
                 missing.append("RPC_URL")
             if not safe_address:
                 missing.append("SAFE_ADDRESS")
-            if not sender_address:
-                missing.append("SAFE_PROPOSER")
                 
             return (False, None, f"Missing required parameters: {', '.join(missing)}. "
                                f"Set these in your global config at {GLOBAL_CONFIG_PATH}")
         
-        # Run the forge script
-        forge_runner = ForgeScriptRunner(rpc_url, project_dir or os.getcwd())
-        safe_builder = SafeTransactionBuilder(safe_address, rpc_url)
+        # Process the transaction
+        success, tx_hash, result = process_safe_transaction(
+            script_path=script_path,
+            rpc_url=rpc_url,
+            safe_address=safe_address,
+            project_dir=project_dir,
+            password=password,
+            dry_run=dry_run
+        )
         
-        success, json_data, error = forge_runner.run_forge_script(script_path)
-        if not success:
-            return (False, None, f"Error running forge script: {error}")
-        
-        # Build the safe transaction
-        safe_tx = safe_builder.build_safe_tx(json_data)
-        
-        # Sign if account provided
-        signature = ""
-        if not account:
-            account_name, address = select_wallet()
-            signature = sign_tx(safe_tx, account_name, password)
+        if success:
+            return (True, tx_hash, None)
         else:
-            signature = sign_tx(safe_tx, account, password)
-
-        # Create the transaction JSON
-        tx_json = safe_builder.safe_tx_to_json(sender_address, safe_tx, signature=signature)
+            return (False, None, result)
+    
+    except ImportError as e:
+        # Get the specific missing module
+        missing_module = str(e).split("'")[1] if "'" in str(e) else "unknown"
         
-        # Submit the transaction unless dry run
-        if not dry_run and signature:
-            submit_safe_tx(tx_json)
+        error_msg = (
+            f"Missing Safe dependency: '{missing_module}'\n"
+            "The Safe transaction functionality requires additional packages.\n"
+            "Install with: pip install 'foundry-wrap[safe]'\n\n"
+        )
         
-        return (True, safe_tx.safe_tx_hash.hex(), None)
+        if missing_module == "safe_eth.safe":
+            error_msg += "Required package: 'safe-eth-py' is missing."
+        elif missing_module.startswith("eth_"):
+            error_msg += f"Required Ethereum dependency '{missing_module}' is missing."
+        elif missing_module == "web3":
+            error_msg += "Required 'web3' package for Ethereum interactions is missing."
         
+        return (False, None, error_msg)
+    
     except Exception as e:
         return (False, None, str(e))
 
 if __name__ == "__main__":
     try:
         sys.exit(main())
-    except ImportError:
-        console.print("[red]Error:[/red] Safe dependencies not installed")
-        console.print("Install with: pip install 'fwrap[safe]'")
+    except ImportError as e:
+        # Get the specific missing module
+        missing_module = str(e).split("'")[1] if "'" in str(e) else "unknown"
+        
+        console.print(f"[red]Error:[/red] Safe dependencies not installed - missing module: [bold]{missing_module}[/bold]")
+        console.print("This functionality requires the Gnosis Safe packages and related dependencies.")
+        console.print("\nTo fix, install the safe extras:")
+        console.print("    pip install 'foundry-wrap[safe]'")
+        
+        if missing_module == "safe_eth.safe":
+            console.print("\nSpecifically missing the 'safe-eth-py' package.")
+        elif missing_module.startswith("eth_"):
+            console.print(f"\nSpecifically missing the '{missing_module}' Ethereum dependency.")
+        elif missing_module == "web3":
+            console.print("\nSpecifically missing the 'web3' package for Ethereum interactions.")
+        
+        # Print additional debugging info if module is unexpected
+        if not any(m in missing_module for m in ["safe_eth", "eth_", "web3"]):
+            console.print(f"\nUnexpected missing module. Please file a bug report with this info:")
+            import traceback
+            console.print(traceback.format_exc())
+            
         sys.exit(1)

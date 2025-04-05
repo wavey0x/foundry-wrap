@@ -1,9 +1,11 @@
-"""Script parsing and modification for fwrap."""
+"""Script parsing and modification for foundry-wrap."""
 
 import re
 from pathlib import Path
-from typing import Dict, List, Optional, Match
-from .interface_manager import InterfaceManager
+from typing import Dict, List, Optional, Match, Union
+
+from foundry_wrap.interface_manager import InterfaceManager
+from foundry_wrap.settings import FoundryWrapSettings
 
 class ScriptParser:
     """Parser for Foundry script files to extract and process interface directives."""
@@ -95,10 +97,9 @@ class ScriptParser:
         """
         updated_content = self.original_content
         
-        # Get an instance of the InterfaceManager
-        # Assuming config is available from somewhere, or use a default empty config
-        config = {}  # You might need to adjust this
-        interface_manager = InterfaceManager(config)
+        # Get an instance of the InterfaceManager using the setting system
+        settings = FoundryWrapSettings()
+        interface_manager = InterfaceManager(settings)
         
         # First, add imports for all interfaces at the top of the file
         import_statements = []

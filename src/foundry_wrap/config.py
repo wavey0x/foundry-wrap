@@ -1,31 +1,36 @@
-"""Configuration management for fwrap."""
+"""Configuration management for foundry-wrap"""
 
 import os
 from pathlib import Path
 from typing import Dict, Any, Optional
 
-import toml
-from dotenv import load_dotenv
+from foundry_wrap.settings import (
+    GLOBAL_CONFIG_PATH, 
+    FOUNDRY_WRAP_DIR, 
+    create_default_global_config,
+    load_settings,
+    FoundryWrapSettings
+)
 
 # Load environment variables
 load_dotenv()
 
 # Get user's home directory
 HOME_DIR = Path.home()
-FWRAP_DIR = HOME_DIR / ".fwrap"
-FWRAP_DIR.mkdir(exist_ok=True)
+FOUNDRY_WRAP_DIR = HOME_DIR / ".foundry-wrap"
+FOUNDRY_WRAP_DIR.mkdir(exist_ok=True)
 
 # Global config path
-GLOBAL_CONFIG_PATH = HOME_DIR / ".fwrap" / "config.toml"
+GLOBAL_CONFIG_PATH = HOME_DIR / ".foundry-wrap" / "config.toml"
 
 # Default configuration
 DEFAULT_CONFIG = {
     "cache": {
-        "path": str(FWRAP_DIR / "interface-cache.json"),
+        "path": str(FOUNDRY_WRAP_DIR / "interface-cache.json"),
         "enabled": True,
     },
     "interfaces": {
-        "global_path": str(FWRAP_DIR / "interfaces"),  # Global interfaces
+        "global_path": str(FOUNDRY_WRAP_DIR / "interfaces"),  # Global interfaces
         "local_path": "interfaces",  # Default project interfaces location
         "overwrite": False,
     },
@@ -72,73 +77,21 @@ def create_default_global_config() -> None:
 
 def load_config(config_path: Optional[str] = None, cli_options: Dict[str, Any] = None) -> Dict[str, Any]:
     """
-    Load configuration from various sources in order of precedence:
-    1. CLI options
-    2. Local config file (.fwrap.toml in current directory)
-    3. Custom config file (if specified)
-    4. Global config file (~/.config/fwrap/config.toml)
-    5. Default values
+    Load configuration from various sources in order of precedence.
+    This is maintained for backward compatibility.
+    
+    Returns a dictionary with the settings.
     """
-    # Start with empty config
-    config = {}
-    
-    # Create or load global config
-    if not GLOBAL_CONFIG_PATH.exists():
-        try:
-            create_default_global_config()
-            with open(GLOBAL_CONFIG_PATH, "r") as f:
-                config.update(toml.load(f))
-        except (toml.TomlDecodeError, OSError) as e:
-            print(f"Warning: Error creating or reading global config file: {e}")
-    else:
-        try:
-            with open(GLOBAL_CONFIG_PATH, "r") as f:
-                config.update(toml.load(f))
-        except (toml.TomlDecodeError, OSError) as e:
-            print(f"Warning: Error reading global config file: {e}")
-    
-    # Load custom config if specified
-    if config_path:
-        try:
-            with open(config_path, "r") as f:
-                config.update(toml.load(f))
-        except (toml.TomlDecodeError, OSError) as e:
-            print(f"Warning: Error reading custom config file: {e}")
-    
-    # Load local config if it exists
-    local_config_path = Path(".fwrap.toml")
-    if local_config_path.exists():
-        try:
-            with open(local_config_path, "r") as f:
-                config.update(toml.load(f))
-        except (toml.TomlDecodeError, OSError) as e:
-            print(f"Warning: Error reading local config file: {e}")
-    
-    # Apply CLI options (highest precedence)
-    if cli_options:
-        _deep_update(config, _expand_dotted_keys(cli_options))
-    
-    # Ensure required config sections exist
-    if "interfaces" not in config:
-        config["interfaces"] = {}
-    if "local_path" not in config["interfaces"]:
-        config["interfaces"]["local_path"] = "interfaces"
-    if "safe" not in config:
-        config["safe"] = {}
-    if "rpc" not in config:
-        config["rpc"] = {}
-    
-    # Ensure required directories exist
-    Path(config["interfaces"]["local_path"]).mkdir(parents=True, exist_ok=True)
-    Path(config["interfaces"]["global_path"]).mkdir(parents=True, exist_ok=True)
-    Path(config["cache"]["path"]).parent.mkdir(parents=True, exist_ok=True)
-    
-    return config
+    settings = load_settings(config_path, cli_options)
+    # Convert the Pydantic Settings to a dictionary for backward compatibility
+    return settings.model_dump(mode="python")
 
 def _expand_dotted_keys(options: Dict[str, Any]) -> Dict[str, Any]:
     """
     Expand dotted keys in a dictionary to nested dictionaries.
     Example: {"a.b.c": "value"} -> {"a": {"b": {"c": "value"}}}
+    
+    Maintained for backward compatibility.
     """
     result = {}
     for key, value in options.items():
@@ -157,6 +110,8 @@ def _expand_dotted_keys(options: Dict[str, Any]) -> Dict[str, Any]:
 def _deep_update(target: Dict[str, Any], source: Dict[str, Any]) -> None:
     """
     Recursively update a dictionary with another dictionary.
+    
+    Maintained for backward compatibility.
     """
     for key, value in source.items():
         if key in target and isinstance(target[key], dict) and isinstance(value, dict):
@@ -165,7 +120,11 @@ def _deep_update(target: Dict[str, Any], source: Dict[str, Any]) -> None:
             target[key] = value
 
 def deep_merge(base: dict, override: dict) -> None:
-    """Recursively merge override dict into base dict."""
+    """
+    Recursively merge override dict into base dict.
+    
+    Maintained for backward compatibility.
+    """
     for key, value in override.items():
         if key in base and isinstance(base[key], dict) and isinstance(value, dict):
             deep_merge(base[key], value)
