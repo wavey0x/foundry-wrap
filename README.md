@@ -102,9 +102,73 @@ Most projects will want to configure these settings:
 All settings can be overridden with environment variables prefixed with `FOUNDRY_WRAP_`, for example:
 
 ```bash
-export FOUNDRY_WRAP_RPC_URL="https://eth-mainnet.g.alchemy.com/v2/YOUR_API_KEY"
-export FOUNDRY_WRAP_SAFE_ADDRESS="0x1234...5678"
+# Nested settings use double underscores between section and key
+export FOUNDRY_WRAP_RPC__URL="https://eth-mainnet.g.alchemy.com/v2/YOUR_API_KEY"
+export FOUNDRY_WRAP_SAFE__SAFE_ADDRESS="0x1234...5678"
+export FOUNDRY_WRAP_SAFE__PROPOSER="0xabcd...ef01"
 ```
+
+#### Environment Variable Naming
+
+Environment variables follow this pattern:
+
+- Prefix: `FOUNDRY_WRAP_`
+- Format for nested settings: `FOUNDRY_WRAP_SECTION__KEY`
+- Example: `safe.proposer` becomes `FOUNDRY_WRAP_SAFE__PROPOSER`
+
+Common environment variables:
+
+- `FOUNDRY_WRAP_RPC__URL` - RPC endpoint
+- `FOUNDRY_WRAP_SAFE__SAFE_ADDRESS` - Safe address
+- `FOUNDRY_WRAP_SAFE__PROPOSER` - EOA proposer address
+- `ETHERSCAN_API_KEY` - Special case with no prefix
+
+#### Settings Precedence (highest to lowest)
+
+1. **Command-line arguments** (`--safe-address`, `--rpc-url`, etc.)
+2. **Environment variables** (with `FOUNDRY_WRAP_` prefix)
+3. **Project-local config** (`foundry-wrap.toml` in project directory)
+4. **Global config** (`~/.foundry-wrap/config.toml`)
+5. **Default values** (defined in the code)
+
+When multiple sources define the same setting, the higher precedence value is used.
+
+## Interface Directives
+
+During the course of multisig operations, it is common to want to interface with external contracts. foundry-wrap introduces a handy feature called "Interface Directives" which, when used, will automatically fetch and generate correct interfaces for your script and seamlessly inject them into your script. Just follow these steps:
+
+1. Add a directive in your Solidity script using the format `@InterfaceName(0x123)` followed by a contract address, where `InterfaeName` is whatever you'd like to call this interface.
+2. foundry-wrap detects these directives and fetches the address's abi from Etherscan, and uses it to generate a valid solidity interface.
+3. The generated interfaces are saved to your project and imported into your script before compile time
+4. The original directives are replaced with the actual interface names in the script
+
+### Valid Directive Format
+
+A valid directive must follow these rules:
+
+- Must start with `@` followed by a single capital letter (e.g., `@IERC20`)
+- Must be within contract body code, not in comments
+- Must be associated with a valid Ethereum address (0x...)
+
+Example of a valid directive:
+
+```solidity
+contract MyScript is Script {
+    @IERC20 public token = @IERC20(0x6B175474E89094C44Da98b954EedeAC495271d0F);
+
+    function run() public {
+        // token is now a valid IERC20 interface
+        token.transfer(recipient, amount);
+    }
+}
+```
+
+### Interface Caching
+
+Generated interfaces are cached locally to improve performance for subsequent runs. You can:
+
+- List cached interfaces with `uvx foundry-wrap list`
+- Clear the cache with `uvx foundry-wrap clear-cache`
 
 ## Requirements
 

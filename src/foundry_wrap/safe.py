@@ -5,7 +5,6 @@ This module provides functionality to create and sign Gnosis Safe transactions
 from Foundry forge script executions.
 """
 
-import subprocess
 import json
 import os
 from typing import Optional, Dict, Any, NamedTuple, Tuple, List
@@ -13,6 +12,7 @@ from pathlib import Path
 import sys
 import asyncio
 from asyncio.subprocess import Process
+import subprocess  # Keep for ForgeScriptRunner
 import requests
 import argparse
 from eth_hash.auto import keccak
@@ -25,7 +25,15 @@ from safe_eth.safe.safe_tx import SafeTx
 from safe_eth.safe.signatures import signature_split, signature_to_bytes
 from safe_eth.safe.api import TransactionServiceApi
 from safe_eth.safe.safe_signature import SafeSignature
-from foundry_wrap.settings import GLOBAL_CONFIG_PATH, FoundryWrapSettings
+from foundry_wrap.settings import GLOBAL_CONFIG_PATH, FoundryWrapSettings, load_settings, RpcSettings, SafeSettings
+# Import the cast helper functions with aliases to avoid naming conflicts
+from foundry_wrap.cast import (
+    sign_transaction, 
+    get_address, 
+    list_wallets, 
+    select_wallet, 
+    CastError
+)
 from rich.console import Console
 
 # Create a console instance at the module level
@@ -251,126 +259,36 @@ def checksum_address(address: str) -> str:
     
     return checksum_addr
 
-def sign_tx(safe_tx: SafeTx, signer: str = None, password: str = None) -> str:
+def sign_tx(safe_tx: SafeTx, proposer: str = None, password: str = None) -> str:
     """Sign a Safe transaction using cast wallet sign"""
-    tx_hash_hex = safe_tx.safe_tx_hash.hex()    
-    cmd = ["cast", "wallet", "sign"]
-    if signer:
-        cmd.extend(["--account", signer])
-    if password:
-        cmd.extend(["--password", password])
-    cmd.extend([f"{tx_hash_hex}", "--no-hash"])
-    # console.print(f"[yellow]Signing transaction with command: {' '.join(cmd)}[/yellow]")
+    tx_hash_hex = safe_tx.safe_tx_hash.hex()   
+    console.print(f"Signing transaction with {proposer}...")
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            check=True
+        # Use the cast.py helper function
+        signature = sign_transaction(
+            tx_hash=tx_hash_hex,
+            account=proposer,
+            password=password,
+            no_hash=True
         )
-        signature = result.stdout.strip()
         return signature
-    except subprocess.CalledProcessError as e:
-        console.print(f"[red]Error signing transaction: {e.stderr}[/red]")
+    except CastError as e:
+        console.print(f"[red]Error signing transaction: {str(e)}[/red]")
         raise
 
-def get_signer_address(account: str = None, password: str = None, is_hw_wallet: bool = False, mnemonic_index: int = None) -> str:
+def get_proposer_address(proposer: str = None, password: str = None, is_hw_wallet: bool = False, mnemonic_index: int = None) -> str:
     """Get the address for an account using cast wallet address"""
-    cmd = ["cast", "wallet", "address"]
-    
-    if account:
-        cmd.extend(["--account", account])
-    if is_hw_wallet:
-        cmd.append("--ledger")
-        if mnemonic_index is not None:
-            cmd.extend(["--mnemonic-index", str(mnemonic_index)])
-    if password:
-        cmd.extend(["--unsafe-password", password])
-    
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            check=True
+        return get_address(
+            account=proposer,
+            password=password,
+            is_hw_wallet=is_hw_wallet,
+            mnemonic_index=mnemonic_index
         )
-        return result.stdout.strip()
-    except subprocess.CalledProcessError as e:
-        print(f"Error getting address: {e.stderr}")
+    except CastError as e:
+        console.print(f"[red]Error getting address: {str(e)}[/red]")
         raise
 
-def select_wallet() -> Tuple[str, str]:
-    """
-    List all available cast wallets and let the user select one.
-    Returns a tuple of (wallet_name, wallet_address)
-    """
-    try:
-        result = subprocess.run(
-            ["cast", "wallet", "ls"],
-            capture_output=True,
-            text=True,
-            check=True
-        )
-        # Parse the output to get a list of wallet names and addresses
-        lines = result.stdout.strip().split('\n')
-        wallets = []
-        wallet_addresses = []
-        
-        # Skip the header line
-        for line in lines[1:]:
-            if line and not line.startswith('NAME'):
-                parts = line.split()
-                if len(parts) >= 2:  # Ensure we have both name and address
-                    wallets.append(parts[0])
-                    wallet_addresses.append(parts[1])
-        
-        if not wallets:
-            console.print("[red]No wallets found.[/red]")
-            console.print("Create a wallet first with: cast wallet new")
-            raise ValueError("No wallets available")
-        
-        # Display wallets with numbers for selection
-        console.print("[bold]Available wallets:[/bold]")
-        for i, (wallet, address) in enumerate(zip(wallets, wallet_addresses)):
-            console.print(f"  {i+1}. {wallet} - {address}")
-        
-        # Get user selection
-        while True:
-            try:
-                selection = console.input("\nSelect a wallet to sign with: ")
-                index = int(selection) - 1
-                if 0 <= index < len(wallets):
-                    return wallets[index], wallet_addresses[index]
-                else:
-                    console.print(f"[red]Invalid selection. Please enter a number between 1 and {len(wallets)}.[/red]")
-            except ValueError:
-                console.print("[red]Please enter a valid number.[/red]")
-        get_signer_address()
-    except subprocess.CalledProcessError as e:
-        console.print(f"[red]Error listing wallets: {e.stderr}[/red]")
-        raise
-
-def list_wallets() -> List[str]:
-    """List all available cast wallets"""
-    try:
-        result = subprocess.run(
-            ["cast", "wallet", "ls"],
-            capture_output=True,
-            text=True,
-            check=True
-        )
-        # Parse the output to get a list of wallet names
-        lines = result.stdout.strip().split('\n')
-        wallets = []
-        for line in lines:
-            if line and not line.startswith('NAME'):  # Skip header
-                parts = line.split()
-                if parts:
-                    wallets.append(parts[0])
-        return wallets
-    except subprocess.CalledProcessError as e:
-        print(f"Error listing wallets: {e.stderr}")
-        raise
 
 def submit_safe_tx(tx_json: Dict[str, Any]) -> Dict[str, Any]:
     """Submit a Safe transaction to the Safe Transaction Service API"""
@@ -405,6 +323,7 @@ def process_safe_transaction(
     safe_address: str,
     project_dir: str = None,
     nonce: int = None,
+    proposer: str = None,
     password: str = None,
     chain_id: str = "1",
     dry_run: bool = False,
@@ -448,15 +367,31 @@ def process_safe_transaction(
         # Build Safe transaction
         safe_tx = safe_builder.build_safe_tx(json_data, nonce)
         
-        # Sign if account provided or select wallet
+        # Get the proposer
+        proposer_address = None
+        
+        # If no proposer specified, prompt for wallet selection
+        if not proposer:
+            console.print(f"\n[yellow]Please select a proposer wallet...[/yellow]")
+            wallet_name = select_wallet()
+            console.print(f"Selected {wallet_name}")
+            proposer = wallet_name
+            proposer_address = get_address(account=proposer, password=password)
+        else:
+            console.print(f"\n[yellow]Please select the wallet for your set proposer: {proposer}...[/yellow]")
+            wallet_name = select_wallet()
+        
+        
+        # Sign the transaction
         signature = ""
-        account_name, signer_address = select_wallet()
-        signature = sign_tx(safe_tx, account_name, password)
-        console.print(f"[yellow]Enter password again to get signer address[/yellow]")
-        signer_address = get_signer_address(account_name, password)
+        if not dry_run:
+            try:
+                signature = sign_tx(safe_tx, proposer, password)
+            except CastError as e:
+                return False, None, f"Error signing transaction: {str(e)}"
         
         # Create the transaction JSON
-        tx_json = safe_builder.safe_tx_to_json(signer_address, safe_tx, signature=signature)
+        tx_json = safe_builder.safe_tx_to_json(proposer_address, safe_tx, signature=signature)
         
         # Format transaction hash
         tx_hash = safe_tx.safe_tx_hash.hex()
@@ -476,11 +411,10 @@ def main():
     parser.add_argument('script_file', help='The script file to execute')
     parser.add_argument('--project-dir', default=os.getcwd(), help='Root directory of Forge project')
     parser.add_argument('--nonce', type=int, help='The nonce to use for the transaction')
-    parser.add_argument('--account', help='The account to use for signing')
+    parser.add_argument('--proposer', help='The proposer to use for signing')
     parser.add_argument('--password', help='Password for the account')
     parser.add_argument('--rpc-url', help='RPC URL to use for running the script')
     parser.add_argument('--safe-address', help='Safe address to use')
-    parser.add_argument('--sender-address', help='Address that will be shown as the transaction sender')
     parser.add_argument('--chain-id', default='1', help='Chain ID (default: 1 for Ethereum mainnet)')
     parser.add_argument('--debug', action='store_true', help='Debug mode: read from existing broadcast file')
     parser.add_argument('--broadcast-file', help='Path to broadcast file to use in debug mode')
@@ -493,18 +427,40 @@ def main():
     if not script_path.startswith('script/'):
         script_path = f"script/{script_path}"
     
-    # Get environment variables or use args
-    rpc_url = args.rpc_url or os.getenv("RPC_URL")
-    safe_address = args.safe_address or os.getenv("SAFE_ADDRESS")
-    chain_id = args.chain_id or os.getenv("CHAIN_ID", "1")
+    # Load settings with CLI options
+    cli_options = {
+        "rpc.url": args.rpc_url,
+        "safe.safe_address": args.safe_address,
+        "safe.proposer": args.proposer,
+    }
+    
+    # Only include non-None options
+    cli_options = {k: v for k, v in cli_options.items() if v is not None}
+    
+    # Load settings from various sources
+    settings = load_settings(cli_options=cli_options)
+    
+    # Extract settings into variables
+    rpc_url = settings.rpc.url
+    safe_address = settings.safe.safe_address
+    proposer = settings.safe.proposer
+    chain_id = args.chain_id or os.getenv("CHAIN_ID", "1")  # Chain ID not part of settings model
     
     # Validate required parameters
+    missing = []
     if not rpc_url:
-        print("Error: RPC_URL environment variable or --rpc-url not set")
-        return 1
-    
+        missing.append("RPC URL")
     if not safe_address:
-        print("Error: SAFE_ADDRESS environment variable or --safe-address not set")
+        missing.append("Safe address")
+    
+    if missing:
+        console.print(f"[red]Error: Missing required parameters: {', '.join(missing)}[/red]")
+        console.print(f"You can set these values in your global config at {GLOBAL_CONFIG_PATH}")
+        console.print("Run the following command to configure:")
+        if "RPC URL" in missing:
+            console.print(f"  foundry-wrap config --global --rpc-url <YOUR_RPC_URL>")
+        if "Safe address" in missing:
+            console.print(f"  foundry-wrap config --global --safe-address <YOUR_SAFE_ADDRESS>")
         return 1
     
     try:
@@ -515,6 +471,7 @@ def main():
             safe_address=safe_address,
             project_dir=args.project_dir,
             nonce=args.nonce,
+            proposer=proposer,
             password=args.password,
             chain_id=chain_id,
             dry_run=args.dry_run,
@@ -525,40 +482,42 @@ def main():
         if success:
             return 0
         else:
-            print(f"Error: {result}")
+            console.print(f"[red]Error: {result}[/red]")
             return 1
             
     except Exception as e:
-        print(f"Error: {str(e)}")
+        console.print(f"[red]Error: {str(e)}[/red]")
         return 1
 
-def foundry_wrap_safe_command(script_path: str, project_dir: str = None, account: str = None, 
-                      password: str = None, rpc_url: str = None, safe_address: str = None, dry_run: bool = False):
+def run_command(script_path: str, project_dir: str = None, proposer: str = None, 
+                password: str = None, rpc_url: str = None, safe_address: str = None, dry_run: bool = False):
     """
     Integration function for foundry-wrap to use safe functionality programmatically.
     Returns a tuple of (success, tx_hash, error_message)
     """
     try:
-        # Ensure we have the required parameters
-        rpc_url = rpc_url or os.getenv("RPC_URL")
-        safe_address = safe_address or os.getenv("SAFE_ADDRESS")
+        # Use the directly provided values - no settings loading
+        # Default rpc_url if not provided
+        effective_rpc_url = rpc_url or "https://eth.merkle.io"
         
-        if not rpc_url or not safe_address:
-            missing = []
-            if not rpc_url:
-                missing.append("RPC_URL")
-            if not safe_address:
-                missing.append("SAFE_ADDRESS")
-                
+        # Validate required parameters
+        missing = []
+        if not effective_rpc_url:
+            missing.append("RPC URL")
+        if not safe_address:
+            missing.append("Safe address")
+        
+        if missing:
             return (False, None, f"Missing required parameters: {', '.join(missing)}. "
-                               f"Set these in your global config at {GLOBAL_CONFIG_PATH}")
+                               f"Set these in your global config or provide directly.")
         
-        # Process the transaction
+        # Process the transaction with direct values
         success, tx_hash, result = process_safe_transaction(
             script_path=script_path,
-            rpc_url=rpc_url,
+            rpc_url=effective_rpc_url,
             safe_address=safe_address,
             project_dir=project_dir,
+            proposer=proposer,
             password=password,
             dry_run=dry_run
         )

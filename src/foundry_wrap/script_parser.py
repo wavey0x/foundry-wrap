@@ -11,8 +11,7 @@ from foundry_wrap.settings import FoundryWrapSettings
 class ScriptParser:
     """Parser for Foundry scripts that handles interface directives."""
     
-    # Regex patter for @ directive detection, including negative lookbehind 
-    # to ensure the @ isn't part of a comment or whitespace
+    # Regex patter for @ directive detection, ensuring it's not part of a comment
     INTERFACE_PATTERN = r'@([A-Z]\w+)'
     
     def __init__(self, script_path: Path, verbose: bool = False):
@@ -36,26 +35,67 @@ class ScriptParser:
         
         if self.verbose:
             click.echo("Searching for interface directives...")
-        matches = re.finditer(self.INTERFACE_PATTERN, content)
-        interfaces = {}
         
-        for match in matches:
-            interface_name = match.group(1)
-            if self.verbose:
-                click.echo(f"Found interface directive: {interface_name}")
+        # Phase 1: Find all potential interface directives
+        interfaces = {}
+        lines = content.split('\n')
+        
+        # Track contract state
+        in_contract = False
+        current_contract = None
+        
+        for i, line in enumerate(lines):
+            line = line.strip()
             
-            # Get the address from the next line
-            next_line = content[match.end():].split('\n')[0]
-            address_match = re.search(r'0x[a-fA-F0-9]{40}', next_line)
+            # Skip empty lines
+            if not line:
+                continue
+                
+            # Skip comment lines
+            if line.startswith('//') or line.startswith('/*') or line.startswith('*'):
+                if self.verbose:
+                    click.echo(f"Skipping comment line {i+1}: {line}")
+                continue
             
-            if address_match:
-                address = address_match.group(0)
+            # Check for contract declaration
+            if line.startswith('contract') or line.startswith('interface'):
+                in_contract = True
+                current_contract = line.split()[1]  # Get contract name
                 if self.verbose:
-                    click.echo(f"Found address for {interface_name}: {address}")
-                interfaces[interface_name] = address
-            else:
+                    click.echo(f"Entering contract {current_contract} on line {i+1}")
+                continue
+                
+            # Check for contract end
+            if line.startswith('}'):
+                if in_contract:
+                    if self.verbose:
+                        click.echo(f"Exiting contract {current_contract} on line {i+1}")
+                    in_contract = False
+                    current_contract = None
+                continue
+            
+            # Process directives within contracts
+            if in_contract:
                 if self.verbose:
-                    click.echo(f"Warning: No address found for interface {interface_name}")
+                    click.echo(f"Processing line {i+1} in contract {current_contract}: {line}")
+                
+                # Look for @ directives
+                matches = re.finditer(self.INTERFACE_PATTERN, line)
+                for match in matches:
+                    interface_name = match.group(1)
+                    if self.verbose:
+                        click.echo(f"Found interface directive in contract {current_contract}: {interface_name}")
+                    
+                    # Get the address from the same line
+                    address_match = re.search(r'0x[a-fA-F0-9]{40}', line)
+                    if address_match:
+                        address = address_match.group(0)
+                        if self.verbose:
+                            click.echo(f"Found address for {interface_name}: {address}")
+                        interfaces[interface_name] = address
+                    else:
+                        if self.verbose:
+                            click.echo(f"Warning: No address found for interface {interface_name}")
         
         if self.verbose:
             click.echo(f"Found {len(interfaces)} interfaces: {interfaces}")

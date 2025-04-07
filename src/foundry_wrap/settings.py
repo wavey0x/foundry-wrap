@@ -42,7 +42,7 @@ class EtherscanSettings(BaseSettings):
 class SafeSettings(BaseSettings):
     """Gnosis Safe related settings."""
     safe_address: str = ""
-    safe_proposer: str = ""
+    proposer: str = ""
 
 
 class RpcSettings(BaseSettings):
@@ -119,10 +119,11 @@ class FoundryWrapSettings(BaseSettings):
             
             # Fix potential PATH environment variable being used incorrectly
             cache_path = self.cache.path
-            if ':' in cache_path and '/' not in cache_path:
+            if ':' in cache_path or len(cache_path) > 255:  # Check for PATH-like string or excessive length
                 # This is likely an environment variable issue
-                cache_path = str(FOUNDRY_WRAP_DIR / "interface-cache.json")
-                self.cache.path = cache_path
+                self.cache.path = str(FOUNDRY_WRAP_DIR / "interface-cache.json")
+                cache_path = self.cache.path
+                print(f"Warning: Invalid cache path detected. Defaulting to {cache_path}")
                 
             # Make sure the parent directory exists
             Path(cache_path).parent.mkdir(parents=True, exist_ok=True)
@@ -145,54 +146,52 @@ class FoundryWrapSettings(BaseSettings):
         Customize settings sources with the following priority:
         1. CLI arguments (init_settings)
         2. Environment variables
-        3. Local .foundry-wrap.toml
+        3. Local foundry-wrap.toml
         4. Global ~/.foundry-wrap/config.toml
         5. Default values
         """
-        local_config = TomlConfigSettingsSource(settings_cls, Path(".foundry-wrap.toml"))
+        local_config = TomlConfigSettingsSource(settings_cls, Path("foundry-wrap.toml"))
         global_config = TomlConfigSettingsSource(settings_cls, GLOBAL_CONFIG_PATH)
         
         return (init_settings, env_settings, dotenv_settings, local_config, global_config)
 
 
-def create_default_global_config() -> None:
-    """Create default global configuration file."""
+def create_default_config(config_path: Path, is_global: bool = False) -> None:
+    """Create default configuration file at the specified path."""
     # Ensure the directory exists
-    config_dir = GLOBAL_CONFIG_PATH.parent
+    config_dir = config_path.parent
     config_dir.mkdir(parents=True, exist_ok=True)
     
     # Create the interfaces directory as well
     interfaces_dir = config_dir / "interfaces"
     interfaces_dir.mkdir(exist_ok=True)
     
-    # Pre-define defaults rather than relying on Pydantic's initialization
-    config_dict = {
-        "cache": {
-            "path": str(FOUNDRY_WRAP_DIR / "interface-cache.json"),
-            "enabled": True,
-        },
-        "interfaces": {
-            "global_path": str(FOUNDRY_WRAP_DIR / "interfaces"),
-            "local_path": "interfaces",
-            "overwrite": False,
-        },
-        "etherscan": {
-            "api_key": os.getenv("ETHERSCAN_API_KEY", ""),
-        },
-        "safe": {
-            "safe_address": "",
-            "safe_proposer": "",
-        },
-        "rpc": {
-            "url": "https://eth.merkle.io",
-        }
-    }
+    # Generate config from Pydantic defaults rather than manually specifying
+    settings = FoundryWrapSettings()
+    config_dict = {}
+    
+    # Convert to hierarchical dict for TOML serialization
+    model_data = settings.model_dump(mode="python")
+    for key, value in model_data.items():
+        if isinstance(value, dict):
+            config_dict[key] = value
+        else:
+            if key not in config_dict:
+                config_dict[key] = {}
+            config_dict[key] = value
+    
+    # Remove specific fields for local config
+    if not is_global:
+        config_dict["cache"].pop("path", None)
+        config_dict["interfaces"].pop("global_path", None)
     
     # Write the config file
-    with open(GLOBAL_CONFIG_PATH, "w") as f:
+    with open(config_path, "w") as f:
+        if not is_global:
+            f.write("# Global config is located at ~/.foundry-wrap/\n\n")
         toml.dump(config_dict, f)
     
-    print(f"Created default global config at {GLOBAL_CONFIG_PATH}")
+    print(f"Created default config at {config_path}")
 
 
 def load_settings(config_path: Optional[str] = None, cli_options: Dict[str, Any] = None) -> FoundryWrapSettings:
@@ -201,13 +200,28 @@ def load_settings(config_path: Optional[str] = None, cli_options: Dict[str, Any]
     """
     # Ensure the global config exists
     if not GLOBAL_CONFIG_PATH.exists():
-        create_default_global_config()
+        create_default_config(GLOBAL_CONFIG_PATH)
+    
+    # Load settings from the global config file
+    global_config_data = {}
+    if GLOBAL_CONFIG_PATH.exists():
+        with open(GLOBAL_CONFIG_PATH, "r") as f:
+            global_config_data = toml.load(f)
+    
+    # Load settings from the local project config file
+    local_config_data = {}
+    local_config_path = Path("foundry-wrap.toml")
+    if local_config_path.exists():
+        with open(local_config_path, "r") as f:
+            local_config_data = toml.load(f)
     
     # Process CLI options to flatten nested mappings
     if cli_options:
         # Convert dotted keys to nested dicts first
         nested_options = {}
         for key, value in cli_options.items():
+            if value is None:
+                continue
             if "." in key:
                 parts = key.split(".")
                 current = nested_options
@@ -230,5 +244,11 @@ def load_settings(config_path: Optional[str] = None, cli_options: Dict[str, Any]
     else:
         flattened_options = {}
     
-    # Create settings with CLI options
-    return FoundryWrapSettings(**flattened_options) 
+    # Merge configurations with the following precedence:
+    # 1. CLI options
+    # 2. Local project config
+    # 3. Global config
+    merged_config = {**global_config_data, **local_config_data, **flattened_options}
+    
+    # Create settings with merged config
+    return FoundryWrapSettings(**merged_config)
