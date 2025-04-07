@@ -219,4 +219,35 @@ class ScriptParser:
         
         if self.verbose:
             click.echo(f"Cleaned script content:\n{content}")
-        self.script_path.write_text(content) 
+        self.script_path.write_text(content)
+    
+    def check_broadcast_block(self, post: bool) -> None:
+        """Check for vm.startBroadcast in the contract and throw an error if not found and post is true."""
+        if self.verbose:
+            click.echo("Checking for broadcast block in the script...")
+
+        content = self.script_path.read_text()
+        lines = content.split('\n')
+
+        # Flag to indicate if startBroadcast is found outside comments
+        start_broadcast_found = False
+
+        for line in lines:
+            stripped_line = line.strip()
+
+            # Skip comment lines
+            if stripped_line.startswith('//') or stripped_line.startswith('/*') or stripped_line.startswith('*'):
+                continue
+
+            # Check for vm.startBroadcast outside of comments
+            if 'vm.startBroadcast' in stripped_line:
+                start_broadcast_found = True
+                break
+
+        if not start_broadcast_found and post:
+            raise ValueError("Script must be wrapped in a broadcast block")
+        elif self.verbose:
+            if start_broadcast_found:
+                click.echo("Broadcast block found in the script.")
+            else:
+                click.echo("Broadcast block not found, but --post is not set.") 

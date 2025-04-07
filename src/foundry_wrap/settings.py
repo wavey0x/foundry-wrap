@@ -43,7 +43,7 @@ class SafeSettings(BaseSettings):
     """Gnosis Safe related settings."""
     safe_address: str = ""
     proposer: str = ""
-
+    proposer_alias: str = ""
 
 class RpcSettings(BaseSettings):
     """RPC-related settings."""
@@ -84,8 +84,6 @@ class TomlConfigSettingsSource(PydanticBaseSettingsSource):
             return d
             
         try:
-            config_data = toml.load(self.config_path)
-            
             # Process the loaded data
             for field_name, field in self.settings_cls.model_fields.items():
                 field_value, field_key, value_is_complex = self.get_field_value(field, field_name)

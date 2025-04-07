@@ -14,9 +14,6 @@ from foundry_wrap.settings import (
     GLOBAL_CONFIG_PATH, 
     create_default_config,
     load_settings,
-    FoundryWrapSettings,
-    RpcSettings,
-    SafeSettings
 )
 from foundry_wrap.interface_manager import InterfaceManager
 from foundry_wrap.script_parser import ScriptParser
@@ -35,28 +32,33 @@ def cli(ctx: click.Context) -> None:
 @cli.command()
 @click.argument("script", type=click.Path(exists=True), required=True)
 @click.option("--verbose", "-v", is_flag=True, help="Enable verbose output")
-@click.option("--config", "-c", type=click.Path(exists=True), help="Path to config file")
-@click.option("--interfaces-path", type=str, help="Local path for storing interfaces")
 @click.option("--rpc-url", type=str, help="RPC URL to use for Ethereum interactions")
 @click.option("--proposer", help="The proposer to use for signing")
-@click.option("--password", help="Password for the account")
+@click.option("--proposer-alias", help="The proposer alias as it appears in cast wallet")
+@click.option("--password", help="Password for the account (not recommended to pass in cleartext)")
 @click.option("--safe-address", help="Safe address to use (overrides config)")
-@click.option("--dry-run", is_flag=True, help="Generate the transaction but do not submit it")
+@click.option("--post", is_flag=True, help="Post the transaction to the service")
 @click.option("--clean", is_flag=True, help="Remove injected interfaces after execution")
 @click.pass_context
-def run(ctx: click.Context, script: str, verbose: bool, config: Optional[str], 
-        interfaces_path: Optional[str], rpc_url: Optional[str], proposer: Optional[str],
-        password: Optional[str], safe_address: Optional[str], dry_run: bool, clean: bool) -> None:
+def run(ctx: click.Context, script: str, verbose: bool, rpc_url: Optional[str], proposer: Optional[str],
+        proposer_alias: Optional[str], password: Optional[str], safe_address: Optional[str], post: bool, clean: bool) -> None:
     """Run a Foundry script and create/submit a Safe transaction."""
     ctx.obj["verbose"] = verbose
     
     # Prepare CLI options for loading settings
     cli_options = {
-        "interfaces.local_path": interfaces_path,
         "rpc.url": rpc_url,
         "safe.proposer": proposer,
+        "safe.proposer_alias": proposer_alias,
         "safe.safe_address": safe_address
     }
+
+    parser = ScriptParser(Path(script), verbose=verbose)
+    try:
+        parser.check_broadcast_block(post)
+    except ValueError as e:
+        console.print(f"[red]{str(e)}[/red]")
+        sys.exit(1)
 
     # Load settings with proper precedence
     settings = load_settings(config_path=config, cli_options=cli_options)
@@ -85,7 +87,6 @@ def run(ctx: click.Context, script: str, verbose: bool, config: Optional[str],
         
         # If interfaces were injected, clean them up on error
         if clean:
-            parser = ScriptParser(Path(script), verbose=verbose)
             parser.clean_interfaces()
             console.print("[yellow]Interfaces cleaned from script.[/yellow]")
             
@@ -100,22 +101,22 @@ def run(ctx: click.Context, script: str, verbose: bool, config: Optional[str],
         script_path=str(script),
         project_dir=None,  # Use current directory
         proposer=settings.safe.proposer,
+        proposer_alias=settings.safe.proposer_alias,
         password=password,
         rpc_url=settings.rpc.url,
         safe_address=settings.safe.safe_address,
-        dry_run=dry_run
+        post=post
     )
     
     # If requested, clean up the injected interfaces
     if clean:
-        parser = ScriptParser(Path(script), verbose=verbose)
         parser.clean_interfaces()
         console.print("[yellow]Interfaces cleaned from script.[/yellow]")
     
     if success:
-        console.print(f"[green]Safe transaction created successfully![/green]")
+        console.print(f"\n[green]Safe transaction created successfully![/green]")
         console.print(f"View it here: https://app.safe.global/transactions/queue?safe={settings.safe.safe_address}")
-        if dry_run:
+        if not post:
             console.print("[yellow]Dry run - transaction not submitted[/yellow]")
     else:
         console.print(f"[red]Error:[/red] {error}")
@@ -263,6 +264,6 @@ def main():
     """Entry point for the CLI."""
     # Ensure global config exists
     if not GLOBAL_CONFIG_PATH.exists():
-        create_default_global_config()
+        create_default_config(GLOBAL_CONFIG_PATH, is_global=True)
         
     cli(obj={})  # This is all you need for a Click application 
