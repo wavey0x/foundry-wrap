@@ -168,13 +168,14 @@ class InterfaceManager:
         file_path.parent.mkdir(parents=True, exist_ok=True)
         
         # Find the existing interface name in the content
-        interface_pattern = r'interface\s+(\w+)'
+        interface_pattern = r'interface\s+(\w+)\s*{'
         match = re.search(interface_pattern, content)
         
         if match:
             # Replace the existing interface name with the requested one
             existing_name = match.group(1)
-            content = content.replace(f"interface {existing_name}", f"interface {interface_name}")
+            if existing_name != interface_name:
+                content = content.replace(f"interface {existing_name}", f"interface {interface_name}")
         
         # Write the modified content
         file_path.write_text(content)
@@ -355,9 +356,23 @@ interface {interface_name} {{
                 console.print(f"[red]Error output:[/red]\n{result.stderr}")
                 raise RuntimeError(f"Failed to generate interface: {result.stderr}")
             
+            # Read the generated interface
+            content = global_path.read_text()
+            
+            # Find the interface name in the generated file
+            interface_pattern = r'interface\s+(\w+)\s*{'
+            match = re.search(interface_pattern, content)
+            
+            if match:
+                # Replace the generated interface name with the requested one
+                generated_name = match.group(1)
+                if generated_name != interface_name:
+                    content = content.replace(f"interface {generated_name}", f"interface {interface_name}")
+                    global_path.write_text(content)
+            
             # Copy to local path
             self.local_path.mkdir(parents=True, exist_ok=True)
-            local_path.write_text(global_path.read_text())
+            local_path.write_text(content)
             
             # Include interface name in the output message
             console.print(f"[green]Generated interface {interface_name} for {address}[/green]")

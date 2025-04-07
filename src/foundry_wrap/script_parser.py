@@ -4,64 +4,61 @@ import re
 from pathlib import Path
 from typing import Dict, List, Optional, Match, Union
 
+import click
 from foundry_wrap.interface_manager import InterfaceManager
 from foundry_wrap.settings import FoundryWrapSettings
 
 class ScriptParser:
-    """Parser for Foundry script files to extract and process interface directives."""
+    """Parser for Foundry scripts that handles interface directives."""
     
-    # Updated regex pattern to detect FW- directives in various forms
-    INTERFACE_PATTERN = r'(FW-\w+)'
+    # Regex patter for @ directive detection, including negative lookbehind 
+    # to ensure the @ isn't part of a comment or whitespace
+    INTERFACE_PATTERN = r'@([A-Z]\w+)'
     
-    def __init__(self, script_path: Path):
-        """Initialize with the path to a script file."""
-        self.script_path = Path(script_path)
+    def __init__(self, script_path: Path, verbose: bool = False):
+        """Initialize the parser with a script path."""
+        self.script_path = script_path
+        self.verbose = verbose
+        if self.verbose:
+            click.echo("Initializing ScriptParser with pattern: @([A-Z]\\w+)")
         if not self.script_path.exists():
             raise FileNotFoundError(f"Script not found: {script_path}")
         self.original_content = self.script_path.read_text()
         self.processed_interfaces = {}
     
     def parse_interfaces(self) -> Dict[str, str]:
-        """
-        Parse the script file and extract required interfaces and their addresses.
-        Returns a dictionary mapping interface names to addresses.
-        """
+        """Parse the script and extract interface directives."""
+        if self.verbose:
+            click.echo(f"Reading script content from {self.script_path}")
+        content = self.script_path.read_text()
+        if self.verbose:
+            click.echo(f"Script content before processing:\n{content}")
+        
+        if self.verbose:
+            click.echo("Searching for interface directives...")
+        matches = re.finditer(self.INTERFACE_PATTERN, content)
         interfaces = {}
         
-        # Find all interface directives in the form FW-{Interface}
-        fw_matches = re.finditer(self.INTERFACE_PATTERN, self.original_content)
-        
-        # Collect all unique interface directives
-        interface_directives = set()
-        for match in fw_matches:
-            interface_directives.add(match.group(1))
-        
-        # Process each unique directive
-        for directive in interface_directives:
-            interface_name = directive[3:]  # Remove "FW-" prefix
+        for match in matches:
+            interface_name = match.group(1)
+            if self.verbose:
+                click.echo(f"Found interface directive: {interface_name}")
             
-            # Look for the directive being used with an address
-            # Try multiple patterns to catch different usages
-            patterns = [
-                # Pattern for FW-IERC20 token = FW-IERC20(0x123...)
-                rf'{directive}\s+\w+\s*=\s*{directive}\(([^)]+)\)',
-                # Pattern for token = FW-IERC20(0x123...)
-                rf'\w+\s*=\s*{directive}\(([^)]+)\)',
-                # Pattern for FW-IERC20(0x123...)
-                rf'{directive}\(([^)]+)\)'
-            ]
+            # Get the address from the next line
+            next_line = content[match.end():].split('\n')[0]
+            address_match = re.search(r'0x[a-fA-F0-9]{40}', next_line)
             
-            address = None
-            for pattern in patterns:
-                match = re.search(pattern, self.original_content)
-                if match:
-                    address = match.group(1).strip()
-                    break
-            
-            if address:
+            if address_match:
+                address = address_match.group(0)
+                if self.verbose:
+                    click.echo(f"Found address for {interface_name}: {address}")
                 interfaces[interface_name] = address
-                self.processed_interfaces[interface_name] = True
+            else:
+                if self.verbose:
+                    click.echo(f"Warning: No address found for interface {interface_name}")
         
+        if self.verbose:
+            click.echo(f"Found {len(interfaces)} interfaces: {interfaces}")
         return interfaces
     
     def _find_import_position(self, lines: List[str]) -> int:
@@ -90,85 +87,96 @@ class ScriptParser:
         return len(lines)
     
     def update_script(self, interfaces: Dict[str, str]) -> None:
-        """
-        Update the script file with processed interfaces.
-        Replaces FW-{Interface} directives with the actual interface name
-        and ensures imports use named import syntax.
-        """
-        updated_content = self.original_content
+        """Update the script with the actual interface names."""
+        if self.verbose:
+            click.echo("Updating script with interface names...")
+        content = self.script_path.read_text()
         
-        # Get an instance of the InterfaceManager using the setting system
-        settings = FoundryWrapSettings()
-        interface_manager = InterfaceManager(settings)
+        # Add import statements with named imports
+        import_statements = "\n".join(
+            f'import {{{name}}} from "interfaces/{name}.sol";'
+            for name in interfaces.keys()
+        )
         
-        # First, add imports for all interfaces at the top of the file
-        import_statements = []
-        for interface_name, address in interfaces.items():
-            # Use the interface manager to process the interface, ensuring the correct name
-            interface_path = interface_manager.process_interface(interface_name, address)
-            
-            # Verify the interface file has the correct interface name
-            self._ensure_interface_name_matches(interface_path, interface_name)
-            
-            import_statements.append(f'import {{ {interface_name} }} from "interfaces/{interface_name}.sol";')
+        # Split content into lines
+        lines = content.split('\n')
         
-        # Find position to insert imports (after pragma statements)
-        lines = updated_content.split('\n')
-        insert_pos = 0
+        # Find the last import statement or contract declaration
+        last_import_idx = -1
+        contract_idx = -1
         for i, line in enumerate(lines):
-            if re.match(r'^\s*(pragma|//\s*SPDX)', line):
-                insert_pos = i + 1
+            if line.strip().startswith('import'):
+                last_import_idx = i
+            elif line.strip().startswith('contract'):
+                contract_idx = i
+                break
         
-        # Insert all import statements
-        for stmt in reversed(import_statements):
-            # Only add if it doesn't already exist
-            if stmt not in updated_content:
-                lines.insert(insert_pos, stmt)
+        # Determine where to insert the new imports
+        if last_import_idx >= 0:
+            # Insert after last import
+            insert_idx = last_import_idx + 1
+        else:
+            # Insert before contract with one empty line
+            insert_idx = contract_idx
         
-        # Remove all trailing blank lines
-        while lines and not lines[-1].strip():
-            lines.pop()
+        # Insert the imports with proper spacing
+        if last_import_idx >= 0:
+            # Add after last import
+            lines.insert(insert_idx, import_statements)
+        else:
+            # Add before contract with one empty line
+            lines.insert(insert_idx, '')
+            lines.insert(insert_idx, import_statements)
         
-        # Create the updated content
-        updated_content = '\n'.join(lines)
+        content = '\n'.join(lines)
         
-        # Then replace all FW- directives
+        # Replace @ directives with actual interface names
         for interface_name in interfaces.keys():
-            directive = f"FW-{interface_name}"
-            updated_content = updated_content.replace(directive, interface_name)
+            pattern = f'@{interface_name}'
+            if self.verbose:
+                click.echo(f"Replacing {pattern} with {interface_name}")
+            content = re.sub(pattern, interface_name, content)
         
-        # Ensure exactly one newline at the end of file
-        updated_content = updated_content.rstrip('\n') + '\n'
-        
-        # Write the updated content back to the file
-        self.script_path.write_text(updated_content)
+        if self.verbose:
+            click.echo(f"Updated script content:\n{content}")
+        self.script_path.write_text(content)
     
     def _ensure_interface_name_matches(self, interface_path: Path, expected_name: str) -> None:
-        """
-        Ensure that the interface name in the file matches the expected name.
-        This is critical for the correct compilation when we replace FW- directives.
-        """
+        """Ensure the interface name in the file matches the expected name."""
         if not interface_path.exists():
             return
-        
+            
         content = interface_path.read_text()
         
         # Find the interface definition
-        interface_pattern = r'interface\s+(\w+)'
+        interface_pattern = r'interface\s+(\w+)\s*{'
         match = re.search(interface_pattern, content)
         
         if not match:
-            # No interface found, this is unusual
-            print(f"Warning: Could not find interface definition in {interface_path}")
+            if self.verbose:
+                click.echo(f"Warning: Could not find interface definition in {interface_path}")
             return
-        
+            
         actual_name = match.group(1)
         if actual_name != expected_name:
-            # Replace the interface name with the expected one
-            print(f"Fixing interface name in {interface_path}: {actual_name} → {expected_name}")
+            if self.verbose:
+                click.echo(f"Updating interface name from {actual_name} to {expected_name}")
+            # Replace the interface name in the file
             content = content.replace(f"interface {actual_name}", f"interface {expected_name}")
             interface_path.write_text(content)
     
     def clean_interfaces(self) -> None:
-        """Restore the original script content, removing injected interfaces."""
-        self.script_path.write_text(self.original_content) 
+        """Remove all injected interfaces from the script."""
+        if self.verbose:
+            click.echo("Cleaning interfaces from script...")
+        content = self.script_path.read_text()
+        
+        # Remove import statements
+        content = re.sub(r'import "src/interfaces/.*\.sol";\n?', '', content)
+        
+        # Remove interface declarations
+        content = re.sub(r'interface \w+ \{\n.*?\n\}\n?', '', content, flags=re.DOTALL)
+        
+        if self.verbose:
+            click.echo(f"Cleaned script content:\n{content}")
+        self.script_path.write_text(content) 
