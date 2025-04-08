@@ -71,8 +71,7 @@ For project-specific settings, you can use the `config set` command to create or
 ```bash
 # Set project-level configuration values
 uvx foundry-wrap config set safe.safe_address 0x1234...5678
-uvx foundry-wrap config set safe.chain_id 1
-uvx foundry-wrap config set foundry.rpc_url https://eth-mainnet.g.alchemy.com/v2/YOUR_API_KEY
+uvx foundry-wrap config set rpc.url https://eth-mainnet.g.alchemy.com/v2/YOUR_API_KEY
 ```
 
 This will create or update a `foundry-wrap.toml` file in your current directory:
