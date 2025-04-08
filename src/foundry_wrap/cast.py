@@ -86,12 +86,8 @@ def sign_transaction(tx_hash: str, account: Optional[str] = None,
         
     cmd.append(tx_hash)
     
-    try:
-        result = run_cast_command(cmd)
-        return result.stdout.strip()
-    except CastError as e:
-        console.print(f"[red]Error signing transaction: {str(e)}[/red]")
-        raise
+    result = run_cast_command(cmd)
+    return result.stdout.strip()
 
 def get_address(account: Optional[str] = None, password: Optional[str] = None, 
                 is_hw_wallet: bool = False, mnemonic_index: Optional[int] = None) -> str:
@@ -121,12 +117,8 @@ def get_address(account: Optional[str] = None, password: Optional[str] = None,
     if password:
         cmd.extend(["--unsafe-password", password])
     
-    try:
-        result = run_cast_command(cmd)
-        return result.stdout.strip()
-    except CastError as e:
-        console.print(f"[red]Error getting wallet address: {str(e)}[/red]")
-        raise
+    result = run_cast_command(cmd)
+    return result.stdout.strip()
 
 def list_wallets() -> List[Tuple[str, str]]:
     """
@@ -435,3 +427,42 @@ def check_cast_installed() -> bool:
         return True
     except Exception:
         return False
+
+def sign_typed_data(typed_data: Dict[str, Any], account: Optional[str] = None, 
+                   password: Optional[str] = None, verbose: bool = False) -> str:
+    """
+    Sign typed data (EIP-712) using cast wallet sign
+    
+    Args:
+        typed_data: The typed data structure to sign
+        account: Optional account name to use for signing
+        password: Optional password for the account
+        verbose: Whether to show debug information
+        
+    Returns:
+        The signature as a string
+    
+    Raises:
+        CastError: If signing fails
+    """
+    # Convert typed data to JSON string
+    typed_data_json = json.dumps(typed_data)
+    
+    if verbose:
+        console = Console()
+        console.print(f"[blue]Using EIP-712 data: {typed_data_json}[/blue]")
+    
+    cmd = ["wallet", "sign", "--data"]
+    
+    if account:
+        cmd.extend(["--account", account])
+    if password:
+        cmd.extend(["--password", password])
+    
+    cmd.append(typed_data_json)
+    
+    if verbose:
+        console.print(f"[blue]Cast command: cast {' '.join(cmd)}[/blue]")
+    
+    result = run_cast_command(cmd)
+    return result.stdout.strip()

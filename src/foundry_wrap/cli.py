@@ -9,6 +9,9 @@ import click
 from rich.console import Console
 from rich.panel import Panel
 import toml
+from getpass import getpass
+import json
+import requests
 
 from foundry_wrap.settings import (
     GLOBAL_CONFIG_PATH, 
@@ -18,7 +21,16 @@ from foundry_wrap.settings import (
 from foundry_wrap.interface_manager import InterfaceManager
 from foundry_wrap.script_parser import ScriptParser
 from foundry_wrap.version import __version__ as VERSION
-from foundry_wrap.safe import run_command
+from foundry_wrap.cast import select_wallet, get_address, CastError
+from foundry_wrap.safe import (
+    run_command, 
+    fetch_next_nonce, 
+    generate_totp, 
+    fetch_safe_transaction_by_nonce, 
+    sign_transaction,
+    sign_delete_request,
+    delete_safe_transaction
+)
 
 console = Console()
 
@@ -28,21 +40,23 @@ console = Console()
 def cli(ctx: click.Context) -> None:
     """Foundry Script Wrapper - Dynamic interface generation for Foundry scripts."""
     ctx.ensure_object(dict)
+    ctx.obj['settings'] = load_settings()
 
 @cli.command()
 @click.argument("script", type=click.Path(exists=True), required=True)
 @click.option("--verbose", "-v", is_flag=True, help="Enable verbose output")
 @click.option("--rpc-url", type=str, help="RPC URL to use for Ethereum interactions")
+@click.option("--safe-address", help="Safe address to use (overrides config)")
+@click.option("--nonce", type=int, help="Custom nonce. If not provided, the next nonce will be used.")
 @click.option("--proposer", help="The proposer to use for signing")
 @click.option("--proposer-alias", help="The proposer alias as it appears in cast wallet")
 @click.option("--password", help="Password for the account (not recommended to pass in cleartext)")
-@click.option("--safe-address", help="Safe address to use (overrides config)")
 @click.option("--post", is_flag=True, help="Post the transaction to the service")
 @click.option("--clean", is_flag=True, help="Remove injected interfaces after execution")
 @click.pass_context
-def run(ctx: click.Context, script: str, verbose: bool, rpc_url: Optional[str], proposer: Optional[str],
-        proposer_alias: Optional[str], password: Optional[str], safe_address: Optional[str], post: bool, clean: bool) -> None:
+def run(ctx: click.Context, script: str, verbose: bool, rpc_url: Optional[str], safe_address: Optional[str], nonce: Optional[int], proposer: Optional[str], proposer_alias: Optional[str], password: Optional[str], post: bool, clean: bool) -> None:
     """Run a Foundry script and create/submit a Safe transaction."""
+
     ctx.obj["verbose"] = verbose
     
     # Prepare CLI options for loading settings
@@ -61,7 +75,7 @@ def run(ctx: click.Context, script: str, verbose: bool, rpc_url: Optional[str], 
         sys.exit(1)
 
     # Load settings with proper precedence
-    settings = load_settings(config_path=config, cli_options=cli_options)
+    settings = load_settings(cli_options=cli_options)
 
     ctx.obj["settings"] = settings
     
@@ -91,11 +105,22 @@ def run(ctx: click.Context, script: str, verbose: bool, rpc_url: Optional[str], 
             console.print("[yellow]Interfaces cleaned from script.[/yellow]")
             
         sys.exit(1)
-    
-    console.print(f"[blue]Safe address:[/blue] {settings.safe.safe_address if settings.safe.safe_address else 'Not set'}")
-    if settings.safe.proposer:
-        console.print(f"[blue]Proposer:[/blue] {settings.safe.proposer}")
-    console.print(f"[blue]RPC URL:[/blue] {settings.rpc.url if settings.rpc.url else 'Not set'}\n")
+
+    nonce = fetch_next_nonce(settings.safe.safe_address) if nonce is None else nonce
+    safe_address = settings.safe.safe_address if settings.safe.safe_address else 'Not set'
+    proposer = settings.safe.proposer if settings.safe.proposer else 'Not set'
+    rpc_url = settings.rpc.url if settings.rpc.url else 'Not set'
+
+    run_info_panel = Panel.fit(
+        f"[light_sky_blue1]Safe address:[/light_sky_blue1] {safe_address}\n"
+        f"[light_sky_blue1]Proposer:[/light_sky_blue1] {proposer}\n"
+        f"[light_sky_blue1]Nonce:[/light_sky_blue1] {nonce}\n"
+        f"[light_sky_blue1]RPC URL:[/light_sky_blue1] {rpc_url}",
+        title="Safe Run Info"
+    )
+
+    # Print the panel
+    console.print(run_info_panel)
     
     success, tx_hash, error = run_command(
         script_path=str(script),
@@ -105,7 +130,8 @@ def run(ctx: click.Context, script: str, verbose: bool, rpc_url: Optional[str], 
         password=password,
         rpc_url=settings.rpc.url,
         safe_address=settings.safe.safe_address,
-        post=post
+        post=post,
+        nonce=nonce
     )
     
     # If requested, clean up the injected interfaces
@@ -113,19 +139,8 @@ def run(ctx: click.Context, script: str, verbose: bool, rpc_url: Optional[str], 
         parser.clean_interfaces()
         console.print("[yellow]Interfaces cleaned from script.[/yellow]")
     
-    if success:
-        console.print(f"\n[green]Safe transaction created successfully![/green]")
-        console.print(f"View it here: https://app.safe.global/transactions/queue?safe={settings.safe.safe_address}")
-        if not post:
-            console.print("[yellow]Dry run - transaction not submitted[/yellow]")
-    else:
+    if not success:
         console.print(f"[red]Error:[/red] {error}")
-        
-        # If interfaces were injected but command failed, clean them up
-        if clean:
-            parser.clean_interfaces()
-            console.print("[yellow]Interfaces cleaned from script.[/yellow]")
-            
         sys.exit(1)
 
 @cli.command()
@@ -259,6 +274,105 @@ def config(ctx: click.Context, global_config: bool, interfaces_path: Optional[st
         console.print(f"Current configuration ([blue]{config_path}[/blue]):")
         with open(config_path, "r") as f:
             console.print(f.read())
+
+@cli.command()
+@click.argument("nonce", type=int, required=True)
+@click.option("--chain-id", type=int, default=None, help="Ethereum chain ID")
+@click.option("--safe-address", type=str, default=None, help="Safe address")
+@click.option("--proposer", help="The proposer to use for signing")
+@click.option("--proposer-alias", help="The proposer alias as it appears in cast wallet")
+@click.option("--password", help="Password for the account (not recommended to pass in cleartext)")
+@click.option("--verbose", "-v", is_flag=True, help="Enable verbose output")
+@click.pass_context
+def delete(ctx: click.Context, nonce: int, chain_id: Optional[int], safe_address: Optional[str], 
+           proposer: Optional[str], proposer_alias: Optional[str], password: Optional[str], 
+           verbose: bool) -> None:
+    """Delete a pending Safe transaction by nonce."""
+    # Load settings
+    cli_options = {
+        "safe.proposer": proposer,
+        "safe.proposer_alias": proposer_alias,
+        "safe.safe_address": safe_address
+    }
+    settings = load_settings(cli_options=cli_options)
+
+    ctx.obj["settings"] = settings
+    
+    # Use provided values or fall back to settings
+    safe_address = safe_address or settings.safe.safe_address
+    proposer = proposer or settings.safe.proposer
+    proposer_alias = proposer_alias or settings.safe.proposer_alias
+    chain_id = chain_id or settings.safe.chain_id or 1  # Default to Ethereum mainnet
+    
+    # Check for required parameters
+    if not safe_address:
+        console.print("[red]Error: Safe address is required. Set it with --safe-address or in your config.[/red]")
+        return
+    
+    # If no proposer specified, prompt for wallet selection
+    if not proposer and not proposer_alias:
+        console.print(f"\n[yellow]Please select a proposer wallet...[/yellow]")
+        try:
+            proposer_alias = select_wallet()
+            console.print(f"Selected {proposer_alias}")
+            proposer = get_address(account=proposer_alias, password=password)
+        except CastError as e:
+            console.print(f"[red]Error accessing wallet: {str(e)}[/red]")
+            return
+        except ValueError as e:
+            console.print(f"[red]{str(e)}[/red]")
+            return
+    elif proposer and not proposer_alias:
+        console.print(f"\n[yellow]Please select the wallet alias for your set proposer: {proposer}...[/yellow]")
+        try:
+            proposer_alias = select_wallet()
+        except ValueError as e:
+            console.print(f"[red]{str(e)}[/red]")
+            return
+    elif not proposer and proposer_alias:
+        try:
+            proposer = get_address(account=proposer_alias, password=password)
+        except CastError as e:
+            console.print(f"[red]Error accessing wallet: {str(e)}[/red]")
+            return
+    
+    # Display information about the operation
+    delete_info_panel = Panel.fit(
+        f"[light_sky_blue1]Safe address:[/light_sky_blue1] {safe_address}\n"
+        f"[light_sky_blue1]Chain ID:[/light_sky_blue1] {chain_id}\n"
+        f"[light_sky_blue1]Target nonce:[/light_sky_blue1] {nonce}\n"
+        f"[light_sky_blue1]Proposer:[/light_sky_blue1] {proposer}",
+        title="Delete Safe Transaction"
+    )
+    console.print(delete_info_panel)
+    
+    # Confirm the operation
+    if not click.confirm("Are you sure you want to delete this transaction?"):
+        console.print("[yellow]Operation aborted by user.[/yellow]")
+        return
+    
+    console.print("[bold blue]Starting transaction deletion...[/bold blue]")
+    
+    try:
+        # Use the delete_safe_transaction function from safe.py
+        success, error_message = delete_safe_transaction(
+            safe_address=safe_address,
+            nonce=nonce,
+            account=proposer_alias,
+            password=password,
+            chain_id=chain_id,
+            verbose=verbose
+        )
+        
+        if success:
+            console.print(f"[green]Successfully deleted Safe transaction with nonce {nonce}[/green]")
+        else:
+            console.print(f"[red]{error_message}[/red]")
+            
+    except CastError as e:
+        console.print(f"[red]Error accessing wallet: {str(e)}[/red]")
+    except Exception as e:
+        console.print(f"[red]Unexpected error: {str(e)}[/red]")
 
 def main():
     """Entry point for the CLI."""

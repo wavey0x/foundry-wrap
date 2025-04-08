@@ -23,12 +23,18 @@ from safe_eth.safe.safe_tx import SafeTx
 from foundry_wrap.settings import GLOBAL_CONFIG_PATH, load_settings
 from foundry_wrap.cast import (
     sign_transaction, 
+    sign_typed_data,
     get_address, 
     list_wallets, 
     select_wallet, 
     CastError
 )
 from rich.console import Console
+import time
+from eth_account import Account
+from eth_account.messages import encode_typed_data
+from rich.status import Status
+from rich.spinner import Spinner
 
 # Create a console instance at the module level
 console = Console()
@@ -48,7 +54,7 @@ class SafeTransaction(NamedTuple):
     gas_price: int = 0
     gas_token: str = NULL_ADDRESS
     refund_receiver: str = NULL_ADDRESS
-    safe_nonce: int = 0
+    safe_nonce: int = None
     safe_tx_hash: bytes = b""
 
 class ForgeScriptRunner:
@@ -141,7 +147,7 @@ class SafeTransactionBuilder:
         self.safe = Safe(self.safe_address, self.ethereum_client)
         self.multisend = MultiSend(self.ethereum_client, self.multisend_address, call_only=True)
         
-    def build_safe_tx(self, forge_output: Dict[str, Any], nonce: int = None) -> SafeTx:
+    def build_safe_tx(self, nonce: int, forge_output: Dict[str, Any]) -> SafeTx:
         """
         Builds Safe transaction from forge output
         Batches all transactions through the MultiSend contract
@@ -165,9 +171,6 @@ class SafeTransactionBuilder:
         # If no valid transactions, raise an error
         if not txs:
             raise ValueError("No valid transactions found in forge output")
-        
-        # Get the next nonce if not provided
-        nonce = fetch_next_nonce(self.safe_address) if nonce is None else nonce
         
         # Build the MultiSend transaction
         data = self.multisend.build_tx_data(txs)
@@ -259,31 +262,24 @@ def sign_tx(safe_tx: SafeTx, proposer: str = None, password: str = None) -> str:
     """Sign a Safe transaction using cast wallet sign"""
     tx_hash_hex = safe_tx.safe_tx_hash.hex()   
     console.print(f"Signing transaction with {proposer}...")
-    try:
-        # Use the cast.py helper function
-        signature = sign_transaction(
-            tx_hash=tx_hash_hex,
-            account=proposer,
-            password=password,
-            no_hash=True
-        )
-        return signature
-    except CastError as e:
-        console.print(f"[red]Error signing transaction: {str(e)}[/red]")
-        raise
+    
+    # Use the cast.py helper function directly
+    return sign_transaction(
+        tx_hash=tx_hash_hex,
+        account=proposer,
+        password=password,
+        no_hash=True
+    )
 
 def get_proposer_address(proposer: str = None, password: str = None, is_hw_wallet: bool = False, mnemonic_index: int = None) -> str:
     """Get the address for an account using cast wallet address"""
-    try:
-        return get_address(
-            account=proposer,
-            password=password,
-            is_hw_wallet=is_hw_wallet,
-            mnemonic_index=mnemonic_index
-        )
-    except CastError as e:
-        console.print(f"[red]Error getting address: {str(e)}[/red]")
-        raise
+    # Call get_address directly without try/except
+    return get_address(
+        account=proposer,
+        password=password,
+        is_hw_wallet=is_hw_wallet,
+        mnemonic_index=mnemonic_index
+    )
 
 
 def submit_safe_tx(tx_json: Dict[str, Any]) -> Dict[str, Any]:
@@ -317,13 +313,13 @@ def process_safe_transaction(
     script_path: str,
     rpc_url: str,
     safe_address: str,
+    nonce: int,
     project_dir: str = None,
-    nonce: int = None,
     proposer: str = None,
     proposer_alias: str = None,
     password: str = None,
     chain_id: str = "1",
-    post: bool = False,
+    post: bool = False
 ) -> Tuple[bool, Optional[str], Optional[str]]:
     """
     Core implementation of Safe transaction processing logic.
@@ -343,7 +339,7 @@ def process_safe_transaction(
             return False, None, f"Error running forge script: {error}"
         
         # Build Safe transaction
-        safe_tx = safe_builder.build_safe_tx(json_data, nonce)
+        safe_tx = safe_builder.build_safe_tx(nonce, json_data)
         
         # If no proposer specified, prompt for wallet selection
         if not proposer:
@@ -373,12 +369,13 @@ def process_safe_transaction(
         # Invert the logic for posting the transaction
         if post:
             # Submit the transaction unless dry run
-            if signature:
-                success = submit_safe_tx(tx_json)
-            else:
+            if not signature:
                 raise ValueError("Cannot post transaction without a signature")
+            success = submit_safe_tx(tx_json)
+            console.print(f"\n[green]Safe transaction created successfully![/green]")
+            console.print(f"View it here: https://app.safe.global/transactions/queue?safe={safe_address}")
         else:
-            console.print("[yellow]Dry run - transaction not submitted[/yellow]")
+            console.print("[yellow]Dry run: transaction not submitted. Use --post option to submit.[/yellow]")
             
         return True, tx_hash, tx_json
         
@@ -387,7 +384,8 @@ def process_safe_transaction(
 
 
 def run_command(script_path: str, project_dir: str = None, proposer: str = None, proposer_alias: str = None,
-                password: str = None, rpc_url: str = None, safe_address: str = None, post: bool = False):
+                password: str = None, rpc_url: str = None, safe_address: str = None, post: bool = False,
+                nonce: int = None):
     """
     Integration function for foundry-wrap to use safe functionality programmatically.
     Returns a tuple of (success, tx_hash, error_message)
@@ -413,11 +411,12 @@ def run_command(script_path: str, project_dir: str = None, proposer: str = None,
             script_path=script_path,
             rpc_url=effective_rpc_url,
             safe_address=safe_address,
+            nonce=nonce,
             project_dir=project_dir,
             proposer=proposer,
             proposer_alias=proposer_alias,
             password=password,
-            post=post
+            post=post,
         )
         
         if success:
@@ -446,3 +445,201 @@ def run_command(script_path: str, project_dir: str = None, proposer: str = None,
     
     except Exception as e:
         return (False, None, str(e))
+
+def generate_totp():
+    """Generate a time-based one-time password for delete request authentication"""
+    return int(time.time()) // 3600
+
+def sign_delete_request(safe_tx_hash: str, account: str, password: Optional[str] = None, safe_address: str = None, chain_id: int = 1, verbose: bool = False) -> Tuple[int, str]:
+    """
+    Sign a delete request for a Safe transaction using EIP-712 typed data
+    
+    Args:
+        safe_tx_hash: Hash of the Safe transaction to delete
+        account: Account alias to use for signing
+        password: Password for the wallet (optional)
+        safe_address: Address of the Safe
+        chain_id: Chain ID of the network
+        verbose: Whether to show debug information
+    
+    Returns:
+        Tuple of (totp, signature)
+    """
+    if not safe_address:
+        raise ValueError("Safe address is required for EIP-712 signing")
+    
+    totp = generate_totp()
+    console.print(f"[blue]Signing delete request for transaction {safe_tx_hash}...[/blue]")
+    
+    # Ensure safe_tx_hash has 0x prefix
+    if not safe_tx_hash.startswith('0x'):
+        safe_tx_hash = '0x' + safe_tx_hash
+    
+    # Create EIP-712 structured data
+    structured_data = {
+        "types": {
+            "EIP712Domain": [
+                {"name": "name", "type": "string"},
+                {"name": "version", "type": "string"},
+                {"name": "chainId", "type": "uint256"},
+                {"name": "verifyingContract", "type": "address"},
+            ],
+            "DeleteRequest": [
+                {"name": "safeTxHash", "type": "bytes32"},
+                {"name": "totp", "type": "uint256"},
+            ]
+        },
+        "domain": {
+            "name": "Safe Transaction Service",
+            "version": "1.0",
+            "chainId": chain_id,
+            "verifyingContract": safe_address,
+        },
+        "primaryType": "DeleteRequest",
+        "message": {
+            # The hash doesn't need to be converted to bytes for the Cast wallet
+            "safeTxHash": safe_tx_hash,
+            "totp": totp,
+        }
+    }
+    
+    # Use the cast.py helper function to sign EIP-712 data
+    signature = sign_typed_data(
+        typed_data=structured_data,
+        account=account,
+        password=password,
+        verbose=verbose
+    )
+    
+    return totp, signature
+
+def fetch_safe_transaction_by_nonce(safe_address: str, nonce: int, chain_id: int = 1) -> Optional[str]:
+    """
+    Fetch a Safe transaction by nonce
+    
+    Returns:
+        The safeTxHash if found, None otherwise
+    """
+    # Use the correct URL format based on chain_id
+    if chain_id == 1:
+        base_url = "https://safe-transaction-mainnet.safe.global"
+    else:
+        # For other networks like Goerli, Sepolia, etc.
+        network_name = "goerli" if chain_id == 5 else f"chain-{chain_id}"
+        base_url = f"https://safe-transaction-{network_name}.safe.global"
+    
+    url = f"{base_url}/api/v2/safes/{safe_address}/multisig-transactions/"
+    headers = {"Content-Type": "application/json"}
+    
+    try:
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        data = response.json()
+        
+        # Filter for pending transactions with matching nonce
+        for tx in data.get('results', []):
+            if isinstance(tx, dict) and 'nonce' in tx:
+                if int(tx['nonce']) == nonce and not tx.get('isExecuted', False):
+                    return tx.get('safeTxHash')
+        
+        return None
+    except requests.exceptions.RequestException as e:
+        console.print(f"[red]Error fetching transactions: {str(e)}[/red]")
+        return None
+
+def delete_safe_transaction(safe_address: str, nonce: int, account: str, password: Optional[str] = None, chain_id: int = 1, verbose: bool = False) -> Tuple[bool, Optional[str]]:
+    """
+    Delete a Safe transaction by nonce
+    
+    Args:
+        safe_address: Address of the Safe
+        nonce: Nonce of the transaction to delete
+        account: Account alias to use for signing
+        password: Optional password for the wallet
+        chain_id: Chain ID of the network
+        verbose: Whether to print verbose debug information
+    
+    Returns:
+        Tuple of (success, error_message)
+    """
+    if not safe_address:
+        return False, "Safe address is required for deletion"
+        
+    # Find the transaction hash for the given nonce
+    console.print(f"[blue]Finding transaction with nonce {nonce}...[/blue]")
+    safe_tx_hash = fetch_safe_transaction_by_nonce(safe_address, nonce, chain_id)
+    if not safe_tx_hash:
+        return False, f"No pending transaction found with nonce {nonce}"
+    
+    console.print(f"[blue]Found transaction with hash: {safe_tx_hash}[/blue]")
+    
+    try:
+        # Get the TOTP and signature for the delete request
+        totp, signature = sign_delete_request(
+            safe_tx_hash=safe_tx_hash,
+            account=account,
+            password=password,
+            safe_address=safe_address,
+            chain_id=chain_id,
+            verbose=verbose
+        )
+        console.print(f"[blue]Generated signature for deletion request[/blue]")
+        
+        # Use the correct URL format based on chain_id
+        if chain_id == 1:
+            base_url = "https://safe-transaction-mainnet.safe.global"
+        else:
+            # For other networks like Goerli, Sepolia, etc.
+            network_name = "goerli" if chain_id == 5 else f"chain-{chain_id}"
+            base_url = f"https://safe-transaction-{network_name}.safe.global"
+        
+        endpoint = f"/api/v2/multisig-transactions/{safe_tx_hash}/"
+        url = base_url + endpoint
+                
+        if verbose:
+            console.print(f"[blue]Request URL: {url}[/blue]")
+        
+        headers = {"Content-Type": "application/json"}
+        data = json.dumps({"signature": signature, "totp": totp})
+        
+        if verbose:
+            console.print(f"[blue]Request payload: {data}[/blue]")
+        
+        # Use Rich spinner to show progress during API call
+        spinner_text = f"[bold blue]Sending delete request for transaction with nonce {nonce}[/bold blue]"
+        with console.status(spinner_text, spinner="point") as status:
+            try:
+                # Add timeout to prevent hanging
+                response = requests.delete(url, headers=headers, data=data, timeout=30)
+                
+                # Update spinner with response status
+                if 200 <= response.status_code < 300:
+                    status.update(f"[green]Request successful! Response code: {response.status_code}[/green]")
+                else:
+                    status.update(f"[yellow]Request received code: {response.status_code}[/yellow]")
+            except requests.exceptions.RequestException as e:
+                status.update(f"[red]Request failed: {str(e)}[/red]")
+                raise
+        
+        # Check for successful response
+        if 200 <= response.status_code < 300:
+            return True, None
+        else:
+            try:
+                error_data = response.json()
+                return False, f"Failed to delete transaction: {json.dumps(error_data, indent=2)}"
+            except:
+                return False, f"Failed to delete transaction: {response.text}"
+    except ValueError as e:
+        return False, str(e)
+    except requests.exceptions.Timeout:
+        return False, "Request timed out while trying to delete the transaction"
+    except requests.exceptions.RequestException as e:
+        error_msg = f"Network error: {str(e)}"
+        if hasattr(e, 'response') and e.response is not None:
+            try:
+                error_data = e.response.json()
+                error_msg += f"\n{json.dumps(error_data, indent=2)}"
+            except:
+                error_msg += f"\n{e.response.text}"
+        return False, error_msg
