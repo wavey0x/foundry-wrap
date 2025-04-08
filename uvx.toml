@@ -1,4 +1,4 @@
 [app]
-name = "foundry-wrap"
+name = "safesmith"
 version = "0.1.0"
-entry_point = "foundry_wrap.__main__:main"
+entry_point = "safesmith.__main__:main"

@@ -1,4 +1,4 @@
-"""Settings management for foundry-wrap using Pydantic Settings."""
+"""Settings management using Pydantic Settings."""
 
 import os
 from pathlib import Path
@@ -14,22 +14,22 @@ load_dotenv()
 
 # Get user's home directory - ensure it's a Path object
 HOME_DIR = Path.home()
-FOUNDRY_WRAP_DIR = HOME_DIR / ".foundry-wrap"
-FOUNDRY_WRAP_DIR.mkdir(exist_ok=True)
+SAFESMITH_DIR = HOME_DIR / ".safesmith"
+SAFESMITH_DIR.mkdir(exist_ok=True)
 
 # Global config path
-GLOBAL_CONFIG_PATH = FOUNDRY_WRAP_DIR / "config.toml"
+GLOBAL_CONFIG_PATH = SAFESMITH_DIR / "config.toml"
 
 
 class CacheSettings(BaseSettings):
     """Cache settings."""
-    path: str = str(FOUNDRY_WRAP_DIR / "interface-cache.json")
+    path: str = str(SAFESMITH_DIR / "interface-cache.json")
     enabled: bool = True
 
 
 class InterfacesSettings(BaseSettings):
     """Interface-related settings."""
-    global_path: str = str(FOUNDRY_WRAP_DIR / "interfaces")
+    global_path: str = str(SAFESMITH_DIR / "interfaces")
     local_path: str = "interfaces"
     overwrite: bool = False
 
@@ -44,6 +44,7 @@ class SafeSettings(BaseSettings):
     safe_address: str = ""
     proposer: str = ""
     proposer_alias: str = ""
+    chain_id: str = "1"  # Default to Ethereum mainnet
 
 class RpcSettings(BaseSettings):
     """RPC-related settings."""
@@ -96,8 +97,8 @@ class TomlConfigSettingsSource(PydanticBaseSettingsSource):
         return d
 
 
-class FoundryWrapSettings(BaseSettings):
-    """Main settings class for foundry-wrap."""
+class SafesmithSettings(BaseSettings):
+    """Main settings class for safesmith."""
     
     cache: CacheSettings = Field(default_factory=CacheSettings)
     interfaces: InterfacesSettings = Field(default_factory=InterfacesSettings)
@@ -105,10 +106,10 @@ class FoundryWrapSettings(BaseSettings):
     safe: SafeSettings = Field(default_factory=SafeSettings)
     rpc: RpcSettings = Field(default_factory=RpcSettings)
     
-    model_config = SettingsConfigDict(env_prefix="FOUNDRY_WRAP_", env_nested_delimiter="__")
+    model_config = SettingsConfigDict(env_prefix="SAFESMITH_", env_nested_delimiter="__")
     
     @model_validator(mode="after")
-    def ensure_directories_exist(self) -> "FoundryWrapSettings":
+    def ensure_directories_exist(self) -> "SafesmithSettings":
         """Ensure all required directories exist."""
         try:
             # Use Path objects for more reliable directory creation
@@ -119,7 +120,7 @@ class FoundryWrapSettings(BaseSettings):
             cache_path = self.cache.path
             if ':' in cache_path or len(cache_path) > 255:  # Check for PATH-like string or excessive length
                 # This is likely an environment variable issue
-                self.cache.path = str(FOUNDRY_WRAP_DIR / "interface-cache.json")
+                self.cache.path = str(SAFESMITH_DIR / "interface-cache.json")
                 cache_path = self.cache.path
                 print(f"Warning: Invalid cache path detected. Defaulting to {cache_path}")
                 
@@ -144,11 +145,11 @@ class FoundryWrapSettings(BaseSettings):
         Customize settings sources with the following priority:
         1. CLI arguments (init_settings)
         2. Environment variables
-        3. Local foundry-wrap.toml
-        4. Global ~/.foundry-wrap/config.toml
+        3. Local safesmith.toml
+        4. Global ~/.safesmith/config.toml
         5. Default values
         """
-        local_config = TomlConfigSettingsSource(settings_cls, Path("foundry-wrap.toml"))
+        local_config = TomlConfigSettingsSource(settings_cls, Path("safesmith.toml"))
         global_config = TomlConfigSettingsSource(settings_cls, GLOBAL_CONFIG_PATH)
         
         return (init_settings, env_settings, dotenv_settings, local_config, global_config)
@@ -165,7 +166,7 @@ def create_default_config(config_path: Path, is_global: bool = False) -> None:
     interfaces_dir.mkdir(exist_ok=True)
     
     # Generate config from Pydantic defaults rather than manually specifying
-    settings = FoundryWrapSettings()
+    settings = SafesmithSettings()
     config_dict = {}
     
     # Convert to hierarchical dict for TOML serialization
@@ -186,13 +187,13 @@ def create_default_config(config_path: Path, is_global: bool = False) -> None:
     # Write the config file
     with open(config_path, "w") as f:
         if not is_global:
-            f.write("# Global config is located at ~/.foundry-wrap/\n\n")
+            f.write("# Global config is located at ~/.safesmith/\n\n")
         toml.dump(config_dict, f)
     
     print(f"Created default config at {config_path}")
 
 
-def load_settings(config_path: Optional[str] = None, cli_options: Dict[str, Any] = None) -> FoundryWrapSettings:
+def load_settings(config_path: Optional[str] = None, cli_options: Dict[str, Any] = None) -> SafesmithSettings:
     """
     Load settings from various sources in order of precedence.
     """
@@ -208,7 +209,7 @@ def load_settings(config_path: Optional[str] = None, cli_options: Dict[str, Any]
     
     # Load settings from the local project config file
     local_config_data = {}
-    local_config_path = Path("foundry-wrap.toml")
+    local_config_path = Path("safesmith.toml")
     if local_config_path.exists():
         with open(local_config_path, "r") as f:
             local_config_data = toml.load(f)
@@ -249,4 +250,4 @@ def load_settings(config_path: Optional[str] = None, cli_options: Dict[str, Any]
     merged_config = {**global_config_data, **local_config_data, **flattened_options}
     
     # Create settings with merged config
-    return FoundryWrapSettings(**merged_config)
+    return SafesmithSettings(**merged_config)

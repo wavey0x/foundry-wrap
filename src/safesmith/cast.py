@@ -12,13 +12,10 @@ import json
 from typing import List, Tuple, Optional, Dict, Any, Union
 from pathlib import Path
 from rich.console import Console
+from safesmith.errors import handle_errors, WalletError, SafesmithError, result_or_raise
 
 # Create a console instance for rich output
 console = Console()
-
-class CastError(Exception):
-    """Exception raised for errors in cast operations."""
-    pass
 
 def run_cast_command(args: List[str], capture_output: bool = True, check: bool = True) -> subprocess.CompletedProcess:
     """
@@ -33,7 +30,7 @@ def run_cast_command(args: List[str], capture_output: bool = True, check: bool =
         CompletedProcess instance
     
     Raises:
-        CastError: If the command fails and check is True
+        WalletError: If the command fails and check is True
     """
     cmd = ["cast"] + args
     
@@ -48,12 +45,12 @@ def run_cast_command(args: List[str], capture_output: bool = True, check: bool =
     except subprocess.CalledProcessError as e:
         error_msg = f"Cast command failed: {e.stderr}"
         if check:
-            raise CastError(error_msg) from e
+            raise WalletError(error_msg, {"command": " ".join(cmd)}) from e
         console.print(f"[yellow]Warning: {error_msg}[/yellow]")
         return e
 
 # Wallet Management Functions
-
+@handle_errors(error_type=WalletError)
 def sign_transaction(tx_hash: str, account: Optional[str] = None, 
                      password: Optional[str] = None, no_hash: bool = True) -> str:
     """
@@ -69,7 +66,7 @@ def sign_transaction(tx_hash: str, account: Optional[str] = None,
         The signature as a string
     
     Raises:
-        CastError: If signing fails
+        WalletError: If signing fails
     """
     # Ensure tx_hash has 0x prefix if it doesn't already
     if not tx_hash.startswith('0x'):
@@ -89,6 +86,7 @@ def sign_transaction(tx_hash: str, account: Optional[str] = None,
     result = run_cast_command(cmd)
     return result.stdout.strip()
 
+@handle_errors(error_type=WalletError)
 def get_address(account: Optional[str] = None, password: Optional[str] = None, 
                 is_hw_wallet: bool = False, mnemonic_index: Optional[int] = None) -> str:
     """
@@ -104,7 +102,7 @@ def get_address(account: Optional[str] = None, password: Optional[str] = None,
         The wallet address as a string
     
     Raises:
-        CastError: If getting the address fails
+        WalletError: If getting the address fails
     """
     cmd = ["wallet", "address"]
     
@@ -120,6 +118,7 @@ def get_address(account: Optional[str] = None, password: Optional[str] = None,
     result = run_cast_command(cmd)
     return result.stdout.strip()
 
+@handle_errors(error_type=WalletError)
 def list_wallets() -> List[Tuple[str, str]]:
     """
     List all available cast wallets
@@ -128,27 +127,24 @@ def list_wallets() -> List[Tuple[str, str]]:
         List of tuples containing (wallet_name, wallet_address)
     
     Raises:
-        CastError: If listing wallets fails
+        WalletError: If listing wallets fails
     """
     cmd = ["wallet", "ls"]
     
-    try:
-        result = run_cast_command(cmd)
-        lines = result.stdout.strip().split('\n')
-        wallets = []
-        
-        # Skip the header line
-        for line in lines[1:]:
-            if line and not line.startswith('NAME'):
-                parts = line.split()
-                if len(parts) >= 2:  # Ensure we have both name and address
-                    wallets.append((parts[0], parts[1]))
-        
-        return wallets
-    except CastError as e:
-        console.print(f"[red]Error listing wallets: {str(e)}[/red]")
-        raise
+    result = run_cast_command(cmd)
+    lines = result.stdout.strip().split('\n')
+    wallets = []
+    
+    # Skip the header line
+    for line in lines[1:]:
+        if line and not line.startswith('NAME'):
+            parts = line.split()
+            if len(parts) >= 2:  # Ensure we have both name and address
+                wallets.append((parts[0], parts[1]))
+    
+    return wallets
 
+@handle_errors(error_type=WalletError)
 def get_wallet_names() -> List[str]:
     """
     Get only the names of available wallets
@@ -156,9 +152,10 @@ def get_wallet_names() -> List[str]:
     Returns:
         List of wallet names
     """
-    wallets = list_wallets()
+    wallets = result_or_raise(list_wallets())
     return [name for name, _ in wallets]
 
+@handle_errors(error_type=WalletError)
 def create_wallet(name: str, password: Optional[str] = None, 
                   mnemonic: Optional[str] = None, private_key: Optional[str] = None) -> str:
     """
@@ -174,7 +171,7 @@ def create_wallet(name: str, password: Optional[str] = None,
         The address of the new wallet
     
     Raises:
-        CastError: If wallet creation fails
+        WalletError: If wallet creation fails
     """
     cmd = ["wallet", "new", name]
     
@@ -185,17 +182,14 @@ def create_wallet(name: str, password: Optional[str] = None,
     if private_key:
         cmd.extend(["--private-key", private_key])
     
-    try:
-        result = run_cast_command(cmd)
-        # Parse the output to get the address
-        for line in result.stdout.strip().split('\n'):
-            if line.startswith('Address:'):
-                return line.split()[1].strip()
-        raise CastError("Failed to parse wallet address from output")
-    except CastError as e:
-        console.print(f"[red]Error creating wallet: {str(e)}[/red]")
-        raise
+    result = run_cast_command(cmd)
+    # Parse the output to get the address
+    for line in result.stdout.strip().split('\n'):
+        if line.startswith('Address:'):
+            return line.split()[1].strip()
+    raise WalletError("Failed to parse wallet address from output")
 
+@handle_errors(error_type=WalletError)
 def import_ledger(name: str, mnemonic_index: int = 0) -> str:
     """
     Import a Ledger hardware wallet
@@ -208,62 +202,55 @@ def import_ledger(name: str, mnemonic_index: int = 0) -> str:
         The address of the imported wallet
     
     Raises:
-        CastError: If Ledger import fails
+        WalletError: If Ledger import fails
     """
     cmd = ["wallet", "import-ledger", name, "--mnemonic-index", str(mnemonic_index)]
     
-    try:
-        result = run_cast_command(cmd)
-        # Parse the output to get the address
-        for line in result.stdout.strip().split('\n'):
-            if line.startswith('Address:'):
-                return line.split()[1].strip()
-        raise CastError("Failed to parse ledger address from output")
-    except CastError as e:
-        console.print(f"[red]Error importing Ledger: {str(e)}[/red]")
-        raise
+    result = run_cast_command(cmd)
+    # Parse the output to get the address
+    for line in result.stdout.strip().split('\n'):
+        if line.startswith('Address:'):
+            return line.split()[1].strip()
+    raise WalletError("Failed to parse ledger address from output")
 
-def select_wallet() -> Tuple[str, str]:
+@handle_errors(error_type=WalletError)
+def select_wallet() -> str:
     """
     Interactive prompt for user to select a wallet from available ones
     
     Returns:
-        Tuple of (wallet_name, wallet_address)
+        The selected wallet name
     
     Raises:
-        ValueError: If no wallets are available
-        CastError: If listing wallets fails
+        WalletError: If no wallets are available or listing wallets fails
     """
-    try:
-        wallets = list_wallets()
-        
-        if not wallets:
-            console.print("[red]No wallets found.[/red]")
-            console.print("Create a wallet first with: cast wallet new")
-            raise ValueError("No wallets available")
-        
-        # Display wallets with numbers for selection
-        console.print("[bold]Available wallets:[/bold]")
-        for i, (wallet, address) in enumerate(wallets):
-            console.print(f"  {i+1}. {wallet} - {address}")
-        
-        # Get user selection
-        while True:
-            try:
-                selection = console.input("\nSelect a wallet: ")
-                index = int(selection) - 1
-                if 0 <= index < len(wallets):
-                    return wallets[index][0] # Return the wallet name only
-                else:
-                    console.print(f"[red]Invalid selection. Please enter a number between 1 and {len(wallets)}.[/red]")
-            except ValueError:
-                console.print("[red]Please enter a valid number.[/red]")
-    except ValueError as e:
-        console.print(f"[red]Error selecting wallet: {str(e)}[/red]")
-        raise
+    wallets = list_wallets()
+    
+    if not wallets:
+        console.print("[red]No wallets found.[/red]")
+        console.print("Create a wallet first with: cast wallet new")
+        raise WalletError("No wallets available")
+    
+    # Display wallets with numbers for selection
+    console.print("[bold]Available wallets:[/bold]")
+    for i, (wallet, address) in enumerate(wallets):
+        console.print(f"  {i+1}. {wallet} - {address}")
+    
+    # Get user selection
+    while True:
+        try:
+            selection = console.input("\nSelect a wallet: ")
+            index = int(selection) - 1
+            if 0 <= index < len(wallets):
+                return wallets[index][0] # Return the wallet name only
+            else:
+                console.print(f"[red]Invalid selection. Please enter a number between 1 and {len(wallets)}.[/red]")
+        except ValueError:
+            console.print("[red]Please enter a valid number.[/red]")
 
 # Utility functions
 
+@handle_errors(error_type=WalletError)
 def get_abi(address: str, etherscan_api_key: Optional[str] = None) -> List[Dict[str, Any]]:
     """
     Get ABI for a contract
@@ -276,7 +263,7 @@ def get_abi(address: str, etherscan_api_key: Optional[str] = None) -> List[Dict[
         The contract ABI as a list of dictionaries
     
     Raises:
-        CastError: If getting ABI fails
+        WalletError: If getting ABI fails
     """
     cmd = ["abi", address]
     
@@ -286,12 +273,10 @@ def get_abi(address: str, etherscan_api_key: Optional[str] = None) -> List[Dict[
     try:
         result = run_cast_command(cmd)
         return json.loads(result.stdout)
-    except json.JSONDecodeError:
-        raise CastError(f"Failed to parse ABI JSON: {result.stdout}")
-    except CastError as e:
-        console.print(f"[red]Error getting contract ABI: {str(e)}[/red]")
-        raise
+    except json.JSONDecodeError as e:
+        raise WalletError(f"Failed to parse ABI JSON: {result.stdout}", {"error": str(e)})
 
+@handle_errors(error_type=WalletError)
 def call_contract(address: str, function_signature: str, *args, 
                  rpc_url: Optional[str] = None) -> str:
     """
@@ -307,7 +292,7 @@ def call_contract(address: str, function_signature: str, *args,
         The function result as a string
     
     Raises:
-        CastError: If the call fails
+        WalletError: If the call fails
     """
     cmd = ["call", address, function_signature]
     cmd.extend([str(arg) for arg in args])
@@ -315,13 +300,10 @@ def call_contract(address: str, function_signature: str, *args,
     if rpc_url:
         cmd.extend(["--rpc-url", rpc_url])
     
-    try:
-        result = run_cast_command(cmd)
-        return result.stdout.strip()
-    except CastError as e:
-        console.print(f"[red]Error calling contract: {str(e)}[/red]")
-        raise
+    result = run_cast_command(cmd)
+    return result.stdout.strip()
 
+@handle_errors(error_type=WalletError)
 def send_transaction(address: str, function_signature: str, *args, 
                     from_account: Optional[str] = None, 
                     value: Optional[str] = None,
@@ -345,7 +327,7 @@ def send_transaction(address: str, function_signature: str, *args,
         The transaction hash
     
     Raises:
-        CastError: If the transaction fails
+        WalletError: If the transaction fails
     """
     cmd = ["send", "--json"]
     
@@ -367,12 +349,10 @@ def send_transaction(address: str, function_signature: str, *args,
         result = run_cast_command(cmd)
         tx_data = json.loads(result.stdout)
         return tx_data.get("transactionHash")
-    except json.JSONDecodeError:
-        raise CastError(f"Failed to parse transaction JSON: {result.stdout}")
-    except CastError as e:
-        console.print(f"[red]Error sending transaction: {str(e)}[/red]")
-        raise
+    except json.JSONDecodeError as e:
+        raise WalletError(f"Failed to parse transaction JSON: {result.stdout}", {"error": str(e)})
 
+@handle_errors(error_type=WalletError)
 def estimate_gas(address: str, function_signature: str, *args, 
                 from_account: Optional[str] = None,
                 value: Optional[str] = None,
@@ -392,7 +372,7 @@ def estimate_gas(address: str, function_signature: str, *args,
         Estimated gas as an integer
     
     Raises:
-        CastError: If gas estimation fails
+        WalletError: If gas estimation fails
     """
     cmd = ["estimate"]
     
@@ -409,12 +389,10 @@ def estimate_gas(address: str, function_signature: str, *args,
     try:
         result = run_cast_command(cmd)
         return int(result.stdout.strip())
-    except ValueError:
-        raise CastError(f"Failed to parse gas estimate: {result.stdout}")
-    except CastError as e:
-        console.print(f"[red]Error estimating gas: {str(e)}[/red]")
-        raise
+    except ValueError as e:
+        raise WalletError(f"Failed to parse gas estimate: {result.stdout}", {"error": str(e)})
 
+@handle_errors(error_type=WalletError)
 def check_cast_installed() -> bool:
     """
     Check if cast is installed and available
@@ -428,8 +406,9 @@ def check_cast_installed() -> bool:
     except Exception:
         return False
 
+@handle_errors(error_type=WalletError)
 def sign_typed_data(typed_data: Dict[str, Any], account: Optional[str] = None, 
-                   password: Optional[str] = None, verbose: bool = False) -> str:
+                   password: Optional[str] = None) -> str:
     """
     Sign typed data (EIP-712) using cast wallet sign
     
@@ -437,20 +416,15 @@ def sign_typed_data(typed_data: Dict[str, Any], account: Optional[str] = None,
         typed_data: The typed data structure to sign
         account: Optional account name to use for signing
         password: Optional password for the account
-        verbose: Whether to show debug information
         
     Returns:
         The signature as a string
     
     Raises:
-        CastError: If signing fails
+        WalletError: If signing fails
     """
     # Convert typed data to JSON string
     typed_data_json = json.dumps(typed_data)
-    
-    if verbose:
-        console = Console()
-        console.print(f"[blue]Using EIP-712 data: {typed_data_json}[/blue]")
     
     cmd = ["wallet", "sign", "--data"]
     
@@ -460,9 +434,6 @@ def sign_typed_data(typed_data: Dict[str, Any], account: Optional[str] = None,
         cmd.extend(["--password", password])
     
     cmd.append(typed_data_json)
-    
-    if verbose:
-        console.print(f"[blue]Cast command: cast {' '.join(cmd)}[/blue]")
     
     result = run_cast_command(cmd)
     return result.stdout.strip()

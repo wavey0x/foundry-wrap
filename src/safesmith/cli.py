@@ -3,7 +3,7 @@
 import os
 import sys
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 
 import click
 from rich.console import Console
@@ -13,38 +13,40 @@ from getpass import getpass
 import json
 import requests
 
-from foundry_wrap.settings import (
+from safesmith.settings import (
     GLOBAL_CONFIG_PATH, 
     create_default_config,
     load_settings,
 )
-from foundry_wrap.interface_manager import InterfaceManager
-from foundry_wrap.script_parser import ScriptParser
-from foundry_wrap.version import __version__ as VERSION
-from foundry_wrap.cast import select_wallet, get_address, CastError
-from foundry_wrap.safe import (
+from safesmith.interface_manager import InterfaceManager
+from safesmith.script_parser import ScriptParser
+from safesmith.version import __version__ as VERSION
+from safesmith.cast import select_wallet, get_address, WalletError
+from safesmith.errors import SafeError, NetworkError, ConfigError, result_or_raise, handle_errors
+from safesmith.safe import (
     run_command, 
-    fetch_next_nonce, 
-    generate_totp, 
-    fetch_safe_transaction_by_nonce, 
-    sign_transaction,
-    sign_delete_request,
-    delete_safe_transaction
+    fetch_next_nonce,
+    delete_safe_transaction,
+    fetch_safe_transaction_by_nonce
 )
 
 console = Console()
 
 @click.group()
-@click.version_option(VERSION, prog_name="foundry-wrap")
+@click.version_option(VERSION, prog_name="safesmith")
 @click.pass_context
 def cli(ctx: click.Context) -> None:
     """Foundry Script Wrapper - Dynamic interface generation for Foundry scripts."""
     ctx.ensure_object(dict)
-    ctx.obj['settings'] = load_settings()
+    try:
+        ctx.obj['settings'] = load_settings()
+    except Exception as e:
+        console.print(f"[red]Error loading settings: {str(e)}[/red]")
+        ctx.obj['settings'] = None
 
 @cli.command()
 @click.argument("script", type=click.Path(exists=True), required=True)
-@click.option("--verbose", "-v", is_flag=True, help="Enable verbose output")
+@click.option("--verbose", is_flag=True, help="Enable verbose output")
 @click.option("--rpc-url", type=str, help="RPC URL to use for Ethereum interactions")
 @click.option("--safe-address", help="Safe address to use (overrides config)")
 @click.option("--nonce", type=int, help="Custom nonce. If not provided, the next nonce will be used.")
@@ -91,7 +93,7 @@ def run(ctx: click.Context, script: str, verbose: bool, rpc_url: Optional[str], 
         console.print(f"You can set these values in your global config at [blue]{GLOBAL_CONFIG_PATH}[/blue]")
         console.print("Run the following command to configure:")
         
-        cmd_parts = ["foundry-wrap config --global"]
+        cmd_parts = ["safesmith config --global"]
         if "RPC URL" in missing_params:
             cmd_parts.append("--rpc-url <YOUR_RPC_URL>")
         if "Safe address" in missing_params:
@@ -106,42 +108,56 @@ def run(ctx: click.Context, script: str, verbose: bool, rpc_url: Optional[str], 
             
         sys.exit(1)
 
-    nonce = fetch_next_nonce(settings.safe.safe_address) if nonce is None else nonce
-    safe_address = settings.safe.safe_address if settings.safe.safe_address else 'Not set'
-    proposer = settings.safe.proposer if settings.safe.proposer else 'Not set'
-    rpc_url = settings.rpc.url if settings.rpc.url else 'Not set'
+    try:
+        # Fetch next nonce if not provided
+        if nonce is None:
+            nonce = fetch_next_nonce(
+                settings.safe.safe_address, 
+                settings.safe.chain_id
+            )
+            
+        safe_address = settings.safe.safe_address
+        proposer = settings.safe.proposer if settings.safe.proposer else 'Not set'
+        rpc_url = settings.rpc.url
+        chain_id = settings.safe.chain_id
 
-    run_info_panel = Panel.fit(
-        f"[light_sky_blue1]Safe address:[/light_sky_blue1] {safe_address}\n"
-        f"[light_sky_blue1]Proposer:[/light_sky_blue1] {proposer}\n"
-        f"[light_sky_blue1]Nonce:[/light_sky_blue1] {nonce}\n"
-        f"[light_sky_blue1]RPC URL:[/light_sky_blue1] {rpc_url}",
-        title="Safe Run Info"
-    )
+        run_info_panel = Panel.fit(
+            f"[light_sky_blue1]Safe address:[/light_sky_blue1] {safe_address}\n"
+            f"[light_sky_blue1]Proposer:[/light_sky_blue1] {proposer}\n"
+            f"[light_sky_blue1]Nonce:[/light_sky_blue1] {nonce}\n"
+            f"[light_sky_blue1]RPC URL:[/light_sky_blue1] {rpc_url}\n"
+            f"[light_sky_blue1]Chain ID:[/light_sky_blue1] {chain_id}",
+            title="Safe Run Info"
+        )
 
-    # Print the panel
-    console.print(run_info_panel)
-    
-    success, tx_hash, error = run_command(
-        script_path=str(script),
-        project_dir=None,  # Use current directory
-        proposer=settings.safe.proposer,
-        proposer_alias=settings.safe.proposer_alias,
-        password=password,
-        rpc_url=settings.rpc.url,
-        safe_address=settings.safe.safe_address,
-        post=post,
-        nonce=nonce
-    )
-    
+        # Print the panel
+        console.print(run_info_panel)
+        
+        # Run the Safe transaction command
+        tx_hash, tx_json = run_command(
+            script_path=str(script),
+            project_dir=None,  # Use current directory
+            proposer=settings.safe.proposer,
+            proposer_alias=settings.safe.proposer_alias,
+            password=password,
+            rpc_url=settings.rpc.url,
+            safe_address=settings.safe.safe_address,
+            post=post,
+            nonce=nonce
+        )
+        
+    except (SafeError, NetworkError, WalletError) as e:
+        console.print(f"[red]Error:[/red] {str(e)}")
+        # If requested, clean up the injected interfaces on error
+        if clean:
+            parser.clean_interfaces()
+            console.print("[yellow]Interfaces cleaned from script.[/yellow]")
+        sys.exit(1)
+        
     # If requested, clean up the injected interfaces
     if clean:
         parser.clean_interfaces()
         console.print("[yellow]Interfaces cleaned from script.[/yellow]")
-    
-    if not success:
-        console.print(f"[red]Error:[/red] {error}")
-        sys.exit(1)
 
 @cli.command()
 @click.pass_context
@@ -203,8 +219,9 @@ def clear_cache(ctx: click.Context, confirm: bool) -> None:
 @click.pass_context
 def config(ctx: click.Context, global_config: bool, interfaces_path: Optional[str], 
            global_interfaces_path: Optional[str], safe_address: Optional[str],
-           proposer: Optional[str], rpc_url: Optional[str], cache_path: Optional[str],
-           cache_enabled: Optional[bool], etherscan_api_key: Optional[str]) -> None:
+           proposer: Optional[str], rpc_url: Optional[str], 
+           cache_path: Optional[str], cache_enabled: Optional[bool], 
+           etherscan_api_key: Optional[str]) -> None:
     """Configure settings."""
     if global_config:
         # Make sure global config exists
@@ -215,7 +232,7 @@ def config(ctx: click.Context, global_config: bool, interfaces_path: Optional[st
         console.print(f"Editing global config at [blue]{config_path}[/blue]")
     else:
         # Project config
-        config_path = Path("foundry-wrap.toml")
+        config_path = Path("safesmith.toml")
         if not config_path.exists():
             create_default_config(config_path, is_global=False)
             console.print(f"Created project config at [blue]{config_path}[/blue]")
@@ -223,66 +240,74 @@ def config(ctx: click.Context, global_config: bool, interfaces_path: Optional[st
     # Update specific settings if provided
     if any([interfaces_path, global_interfaces_path, safe_address, 
             proposer, rpc_url, cache_path, cache_enabled, etherscan_api_key]):
-        # Load existing config
-        with open(config_path, "r") as f:
-            config_data = toml.load(f)
-        
-        # Initialize sections if needed
-        for section in ["interfaces", "safe", "rpc", "cache", "etherscan"]:
-            if section not in config_data:
-                config_data[section] = {}
-        
-        # Update settings
-        if interfaces_path:
-            config_data["interfaces"]["local_path"] = interfaces_path
-            console.print(f"Set local interfaces path to [green]{interfaces_path}[/green]")
+        try:
+            # Load existing config
+            with open(config_path, "r") as f:
+                config_data = toml.load(f)
             
-        if global_interfaces_path:
-            config_data["interfaces"]["global_path"] = global_interfaces_path
-            console.print(f"Set global interfaces path to [green]{global_interfaces_path}[/green]")
+            # Initialize sections if needed
+            for section in ["interfaces", "safe", "rpc", "cache", "etherscan"]:
+                if section not in config_data:
+                    config_data[section] = {}
             
-        if safe_address:
-            config_data["safe"]["safe_address"] = safe_address
-            console.print(f"Set Safe address to [green]{safe_address}[/green]")
+            # Update settings
+            if interfaces_path:
+                config_data["interfaces"]["local_path"] = interfaces_path
+                console.print(f"Set local interfaces path to [green]{interfaces_path}[/green]")
+                
+            if global_interfaces_path:
+                config_data["interfaces"]["global_path"] = global_interfaces_path
+                console.print(f"Set global interfaces path to [green]{global_interfaces_path}[/green]")
+                
+            if safe_address:
+                config_data["safe"]["safe_address"] = safe_address
+                console.print(f"Set Safe address to [green]{safe_address}[/green]")
+                
+            if proposer:
+                config_data["safe"]["proposer"] = proposer
+                console.print(f"Set proposer to [green]{proposer}[/green]")
+                
+            if rpc_url:
+                config_data["rpc"]["url"] = rpc_url
+                console.print(f"Set RPC URL to [green]{rpc_url}[/green]")
+                
+            if cache_path:
+                config_data["cache"]["path"] = cache_path
+                console.print(f"Set cache path to [green]{cache_path}[/green]")
+                
+            if cache_enabled is not None:
+                config_data["cache"]["enabled"] = cache_enabled
+                console.print(f"Set cache enabled to [green]{cache_enabled}[/green]")
+                
+            if etherscan_api_key:
+                config_data["etherscan"]["api_key"] = etherscan_api_key
+                console.print(f"Set Etherscan API key")
             
-        if proposer:
-            config_data["safe"]["proposer"] = proposer
-            console.print(f"Set proposer to [green]{proposer}[/green]")
-            
-        if rpc_url:
-            config_data["rpc"]["url"] = rpc_url
-            console.print(f"Set RPC URL to [green]{rpc_url}[/green]")
-            
-        if cache_path:
-            config_data["cache"]["path"] = cache_path
-            console.print(f"Set cache path to [green]{cache_path}[/green]")
-            
-        if cache_enabled is not None:
-            config_data["cache"]["enabled"] = cache_enabled
-            console.print(f"Set cache enabled to [green]{cache_enabled}[/green]")
-            
-        if etherscan_api_key:
-            config_data["etherscan"]["api_key"] = etherscan_api_key
-            console.print(f"Set Etherscan API key")
-        
-        # Save updated config
-        with open(config_path, "w") as f:
-            toml.dump(config_data, f)
+            # Save updated config
+            with open(config_path, "w") as f:
+                toml.dump(config_data, f)
+        except Exception as e:
+            console.print(f"[red]Error updating config: {str(e)}[/red]")
+            sys.exit(1)
         
     else:
         # Just show the current config
-        console.print(f"Current configuration ([blue]{config_path}[/blue]):")
-        with open(config_path, "r") as f:
-            console.print(f.read())
+        try:
+            console.print(f"Current configuration ([blue]{config_path}[/blue]):")
+            with open(config_path, "r") as f:
+                console.print(f.read())
+        except Exception as e:
+            console.print(f"[red]Error reading config: {str(e)}[/red]")
+            sys.exit(1)
 
-@cli.command()
+@cli.command(name="delete")
 @click.argument("nonce", type=int, required=True)
-@click.option("--chain-id", type=int, default=None, help="Ethereum chain ID")
+@click.option("--chain-id", type=int, default=1, help="Ethereum chain ID")
 @click.option("--safe-address", type=str, default=None, help="Safe address")
 @click.option("--proposer", help="The proposer to use for signing")
 @click.option("--proposer-alias", help="The proposer alias as it appears in cast wallet")
 @click.option("--password", help="Password for the account (not recommended to pass in cleartext)")
-@click.option("--verbose", "-v", is_flag=True, help="Enable verbose output")
+@click.option("--verbose", is_flag=True, help="Enable verbose output")
 @click.pass_context
 def delete(ctx: click.Context, nonce: int, chain_id: Optional[int], safe_address: Optional[str], 
            proposer: Optional[str], proposer_alias: Optional[str], password: Optional[str], 
@@ -296,52 +321,42 @@ def delete(ctx: click.Context, nonce: int, chain_id: Optional[int], safe_address
     }
     settings = load_settings(cli_options=cli_options)
 
-    ctx.obj["settings"] = settings
-    
     # Use provided values or fall back to settings
     safe_address = safe_address or settings.safe.safe_address
     proposer = proposer or settings.safe.proposer
     proposer_alias = proposer_alias or settings.safe.proposer_alias
-    chain_id = chain_id or settings.safe.chain_id or 1  # Default to Ethereum mainnet
+    chain_id = chain_id or getattr(settings.safe, 'chain_id', None) or 1  # Default to Ethereum mainnet
     
     # Check for required parameters
     if not safe_address:
         console.print("[red]Error: Safe address is required. Set it with --safe-address or in your config.[/red]")
         return
     
+    safe_tx_hash = fetch_safe_transaction_by_nonce(safe_address, nonce, chain_id)
+
+    if not safe_tx_hash:
+        console.print(f"[red]Error: No pending transaction found with nonce {nonce}[/red]")
+        sys.exit(1)
+
     # If no proposer specified, prompt for wallet selection
     if not proposer and not proposer_alias:
         console.print(f"\n[yellow]Please select a proposer wallet...[/yellow]")
-        try:
-            proposer_alias = select_wallet()
-            console.print(f"Selected {proposer_alias}")
-            proposer = get_address(account=proposer_alias, password=password)
-        except CastError as e:
-            console.print(f"[red]Error accessing wallet: {str(e)}[/red]")
-            return
-        except ValueError as e:
-            console.print(f"[red]{str(e)}[/red]")
-            return
+        proposer_alias = select_wallet()
+        console.print(f"Selected {proposer_alias}")
+        proposer = get_address(account=proposer_alias, password=password)
     elif proposer and not proposer_alias:
         console.print(f"\n[yellow]Please select the wallet alias for your set proposer: {proposer}...[/yellow]")
-        try:
-            proposer_alias = select_wallet()
-        except ValueError as e:
-            console.print(f"[red]{str(e)}[/red]")
-            return
+        proposer_alias = select_wallet()
     elif not proposer and proposer_alias:
-        try:
-            proposer = get_address(account=proposer_alias, password=password)
-        except CastError as e:
-            console.print(f"[red]Error accessing wallet: {str(e)}[/red]")
-            return
+        proposer = get_address(account=proposer_alias, password=password)
     
     # Display information about the operation
     delete_info_panel = Panel.fit(
         f"[light_sky_blue1]Safe address:[/light_sky_blue1] {safe_address}\n"
         f"[light_sky_blue1]Chain ID:[/light_sky_blue1] {chain_id}\n"
         f"[light_sky_blue1]Target nonce:[/light_sky_blue1] {nonce}\n"
-        f"[light_sky_blue1]Proposer:[/light_sky_blue1] {proposer}",
+        f"[light_sky_blue1]Proposer:[/light_sky_blue1] {proposer}\n"
+        f"[light_sky_blue1]Safe transaction hash:[/light_sky_blue1] {safe_tx_hash}",
         title="Delete Safe Transaction"
     )
     console.print(delete_info_panel)
@@ -351,28 +366,17 @@ def delete(ctx: click.Context, nonce: int, chain_id: Optional[int], safe_address
         console.print("[yellow]Operation aborted by user.[/yellow]")
         return
     
-    console.print("[bold blue]Starting transaction deletion...[/bold blue]")
+    # Use the delete_safe_transaction function from safe.py - with no error display
+    delete_safe_transaction(
+        safe_tx_hash=safe_tx_hash,
+        safe_address=safe_address,
+        nonce=nonce,
+        account=proposer_alias,
+        password=password,
+        chain_id=chain_id,
+    )
     
-    try:
-        # Use the delete_safe_transaction function from safe.py
-        success, error_message = delete_safe_transaction(
-            safe_address=safe_address,
-            nonce=nonce,
-            account=proposer_alias,
-            password=password,
-            chain_id=chain_id,
-            verbose=verbose
-        )
-        
-        if success:
-            console.print(f"[green]Successfully deleted Safe transaction with nonce {nonce}[/green]")
-        else:
-            console.print(f"[red]{error_message}[/red]")
-            
-    except CastError as e:
-        console.print(f"[red]Error accessing wallet: {str(e)}[/red]")
-    except Exception as e:
-        console.print(f"[red]Unexpected error: {str(e)}[/red]")
+    console.print(f"[green]Successfully deleted Safe transaction with nonce {nonce}[/green]")
 
 def main():
     """Entry point for the CLI."""
