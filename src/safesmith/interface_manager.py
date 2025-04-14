@@ -8,6 +8,9 @@ from typing import Dict, Optional, Tuple, Any, Union
 import requests
 import tempfile
 import re
+import importlib.resources as pkg_resources
+import os
+import sys
 
 from rich.console import Console
 from safesmith.settings import SafesmithSettings
@@ -47,6 +50,11 @@ class InterfaceManager:
         self.global_path = Path(self.settings.interfaces.global_path)
         self.global_path.mkdir(parents=True, exist_ok=True)
         
+        # Presets paths
+        self.presets_path = Path(self.settings.presets.path)
+        self.presets_path.mkdir(parents=True, exist_ok=True)
+        self.presets_index_file = Path(self.settings.presets.index_file)
+        
         # API keys for contract explorers
         self.etherscan_api_key = self.settings.etherscan.api_key
         
@@ -55,6 +63,87 @@ class InterfaceManager:
         
         # Temporary directory for downloaded files
         self.temp_dir = Path(tempfile.mkdtemp())
+        
+        # Initialize presets if needed
+        self._init_presets()
+    
+    @handle_errors(error_type=InterfaceError)
+    def _init_presets(self) -> None:
+        """Initialize preset interfaces directory with package presets."""
+        if not self.presets_path.exists():
+            self.presets_path.mkdir(parents=True, exist_ok=True)
+            
+        # Check if presets index exists
+        if not self.presets_index_file.exists():
+            # Copy preset interfaces from package to user directory
+            self._copy_package_presets()
+            
+            # Generate the index file
+            self.update_preset_index()
+    
+    @handle_errors(error_type=InterfaceError)
+    def _copy_package_presets(self) -> None:
+        """Copy preset interfaces from the package to the user's presets directory."""
+        # Get the directory of this module
+        module_dir = Path(__file__).parent
+        package_presets_dir = module_dir / "presets"
+        
+        # Copy each preset interface
+        if package_presets_dir.exists():
+            for preset_file in package_presets_dir.glob("*.sol"):
+                target_path = self.presets_path / preset_file.name
+                if not target_path.exists():
+                    # Read content from source
+                    content = preset_file.read_text()
+                    # Write to target location
+                    target_path.write_text(content)
+                    console.print(f"[green]Copied preset interface: {preset_file.stem}[/green]")
+    
+    @handle_errors(error_type=InterfaceError)
+    def update_preset_index(self) -> None:
+        """Update the preset index from both package and user presets."""
+        presets = {}
+        
+        # Include user presets (from ~/.safesmith/presets/)
+        for preset_file in self.presets_path.glob("*.sol"):
+            presets[preset_file.stem] = str(preset_file)
+        
+        # Write the index file
+        self.presets_index_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.presets_index_file, 'w') as f:
+            json.dump(presets, f, indent=2)
+        
+        console.print(f"[green]Updated preset index with {len(presets)} interfaces[/green]")
+    
+    @handle_errors(error_type=InterfaceError)
+    def load_preset_index(self) -> Dict[str, str]:
+        """Load the preset index from disk."""
+        if self.presets_index_file.exists():
+            try:
+                with open(self.presets_index_file, 'r') as f:
+                    return json.load(f)
+            except json.JSONDecodeError:
+                # If the file is corrupted, regenerate it
+                self.update_preset_index()
+                with open(self.presets_index_file, 'r') as f:
+                    return json.load(f)
+        else:
+            # If the index doesn't exist, generate it
+            self.update_preset_index()
+            if self.presets_index_file.exists():
+                with open(self.presets_index_file, 'r') as f:
+                    return json.load(f)
+            return {}
+    
+    @handle_errors(error_type=InterfaceError)
+    def _get_preset_path(self, interface_name: str) -> Optional[Path]:
+        """Get path to a preset interface by name."""
+        presets = self.load_preset_index()
+        if interface_name in presets:
+            preset_path = Path(presets[interface_name])
+            if preset_path.exists():
+                return preset_path
+        return None
     
     @handle_errors(error_type=InterfaceError)
     def _check_cast_availability(self) -> None:
@@ -109,11 +198,35 @@ class InterfaceManager:
         return local_path, global_path
     
     @handle_errors(error_type=InterfaceError)
-    def process_interface(self, interface_name: str, address: str) -> Path:
+    def process_interface(self, interface_name: str, address: str = None) -> Path:
         """
-        Process an interface for a given address. Look in local and global cache,
-        download from Etherscan if needed.
+        Process an interface for a given address or preset name.
+        
+        Args:
+            interface_name: The name of the interface to process
+            address: The contract address (optional for presets)
+            
+        Returns:
+            Path to the processed interface file
+        
+        Raises:
+            InterfaceError: If the interface cannot be processed
         """
+        # First, check if this is a preset interface (no address or preset takes precedence)
+        if address is None or self._get_preset_path(interface_name):
+            preset_path = self._get_preset_path(interface_name)
+            if preset_path:
+                # Copy preset to local directory
+                local_file = self.local_path / f"{interface_name}.sol"
+                self._copy_to_local(preset_path, interface_name)
+                return local_file
+            elif address is None:
+                # If no address and not a preset, raise an error
+                raise InterfaceError(f"No address provided and {interface_name} is not a known preset. "
+                                    f"Run 'safesmith sync-presets' if you've recently added this preset.")
+        
+        # If we get here, we're handling an address-based interface or a preset wasn't found
+        
         # Try to find in local interfaces directory
         local_file = self.local_path / f"{interface_name}.sol"
         if local_file.exists():

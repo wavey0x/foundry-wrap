@@ -2,12 +2,16 @@
 
 import re
 from pathlib import Path
-from typing import Dict, List, Optional, Match, Union
+from typing import Dict, List, Optional, Match, Union, Set, Tuple
 
 import click
+from rich.console import Console
 from safesmith.interface_manager import InterfaceManager
 from safesmith.settings import SafesmithSettings
 from safesmith.errors import ScriptError, handle_errors
+
+# Create console instance
+console = Console()
 
 class ScriptParser:
     """Parser for Foundry scripts that handles interface directives."""
@@ -15,28 +19,41 @@ class ScriptParser:
     # Regex pattern for @ directive detection, ensuring it's not part of a comment
     INTERFACE_PATTERN = r'@([A-Z]\w+)'
     
-    def __init__(self, script_path: Path, verbose: bool = False):
+    def __init__(self, script_path: Path, verbose: bool = False, interface_manager: Optional[InterfaceManager] = None):
         """Initialize the parser with a script path."""
         self.script_path = script_path
         self.verbose = verbose
+        self.interface_manager = interface_manager
         if not self.script_path.exists():
             raise ScriptError(f"Script not found: {script_path}")
         self.original_content = self.script_path.read_text()
         self.processed_interfaces = {}
     
     @handle_errors(error_type=ScriptError)
-    def parse_interfaces(self) -> Dict[str, str]:
-        """Parse the script and extract interface directives."""
+    def parse_interfaces(self) -> Dict[str, Optional[str]]:
+        """
+        Parse the script and extract interface directives.
+        
+        Returns:
+            Dict mapping interface names to their addresses (None for presets without addresses)
+        """
         content = self.script_path.read_text()
         
         # Find all potential interface directives
-        interfaces = {}
+        interfaces: Dict[str, Optional[str]] = {}
+        presets: Set[str] = set()
+        
+        # Load available presets if interface_manager is provided
+        if self.interface_manager:
+            presets = set(self.interface_manager.load_preset_index().keys())
+        
         lines = content.split('\n')
         
         # Track contract state
         in_contract = False
         current_contract = None
         
+        # First pass: find all @Interface(0xAddress) directives
         for i, line in enumerate(lines):
             line = line.strip()
             
@@ -57,21 +74,34 @@ class ScriptParser:
                     current_contract = None
                 continue
             
-            # Process directives within contracts
-            if in_contract:
-                # Look for @ directives
-                matches = re.finditer(self.INTERFACE_PATTERN, line)
-                for match in matches:
-                    interface_name = match.group(1)
-                    
-                    # Get the address from the same line
-                    address_match = re.search(r'0x[a-fA-F0-9]{40}', line)
-                    if address_match:
-                        address = address_match.group(0)
-                        interfaces[interface_name] = address
+            # Process directives
+            # Look for @ directives
+            matches = re.finditer(self.INTERFACE_PATTERN, line)
+            for match in matches:
+                interface_name = match.group(1)
+                
+                # Check if already processed (to avoid duplicates)
+                if interface_name in interfaces:
+                    continue
+                
+                # Try to find an address on the same line
+                address_match = re.search(r'0x[a-fA-F0-9]{40}', line)
+                if address_match:
+                    # This is a regular directive with an address
+                    address = address_match.group(0)
+                    interfaces[interface_name] = address
+                elif interface_name in presets:
+                    # This is a preset directive without an address
+                    interfaces[interface_name] = None
+                    if self.verbose:
+                        click.echo(f"Found preset directive: @{interface_name}")
+                # Note: directives without addresses that aren't presets are ignored
         
         if self.verbose and interfaces:
-            click.echo(f"Found {len(interfaces)} interfaces in script")
+            address_count = sum(1 for addr in interfaces.values() if addr is not None)
+            preset_count = len(interfaces) - address_count
+            click.echo(f"Found {address_count} address-based interfaces and {preset_count} preset interfaces in script")
+        
         return interfaces
     
     def _find_import_position(self, lines: List[str]) -> int:
@@ -100,7 +130,7 @@ class ScriptParser:
         return len(lines)
     
     @handle_errors(error_type=ScriptError)
-    def update_script(self, interfaces: Dict[str, str]) -> None:
+    def update_script(self, interfaces: Dict[str, Optional[str]]) -> None:
         """Update the script with the actual interface names."""
         if self.verbose:
             click.echo("Updating script with interface imports")
@@ -188,8 +218,14 @@ class ScriptParser:
         self.script_path.write_text(content)
     
     @handle_errors(error_type=ScriptError)
-    def check_broadcast_block(self, post: bool) -> None:
-        """Check for vm.startBroadcast in the contract and throw an error if not found and post is true."""
+    def check_broadcast_block(self, post: bool, skip_broadcast_check: bool = False) -> None:
+        """
+        Check for vm.startBroadcast in the contract and warn if not found and post is true.
+        Ask the user if they want to proceed anyway.
+        """
+        if skip_broadcast_check:
+            return
+            
         content = self.script_path.read_text()
         lines = content.split('\n')
 
@@ -209,4 +245,12 @@ class ScriptParser:
                 break
 
         if not start_broadcast_found and post:
-            raise ScriptError("Script must be wrapped in a broadcast block") 
+            console.print("\n[yellow]WARNING:[/yellow] No broadcast block found in your script.")
+            console.print("Scripts should be wrapped in a broadcast block for proper functionality:")
+            console.print("  • Add a [bold]vm.startBroadcast()[/bold] block in your run() function")
+            console.print("\nTo suppress this warning, you can:")
+            console.print("  • Use the [bold]--skip-broadcast-check[/bold] option")
+            console.print("  • Add [bold]skip_broadcast_check = true[/bold] in the safe section of your config file")
+            
+            if not click.confirm("\nDo you want to proceed anyway?", default=False):
+                raise ScriptError("Operation cancelled by user due to missing broadcast block in script") 

@@ -18,6 +18,9 @@ console = Console()
 # Setup logger
 logger = logging.getLogger("safesmith")
 
+# Global flag to track if an error has been displayed
+_ERROR_DISPLAYED = False
+
 # Type variable for return type
 T = TypeVar('T')
 R = TypeVar('R')
@@ -65,15 +68,32 @@ class ValidationError(SafesmithError):
     """Error related to data validation."""
     pass
 
+# Override console.print to suppress duplicate error messages
+_original_console_print = console.print
+def _filtered_console_print(*args, **kwargs):
+    global _ERROR_DISPLAYED
+    
+    # Check if this is an error message
+    text = ' '.join(str(arg) for arg in args if isinstance(arg, str))
+    is_error = any(error_text in text for error_text in ['Error in', 'Error:', 'Exception:'])
+    
+    # Only print if not an error or if it's the first error
+    if not is_error or not _ERROR_DISPLAYED:
+        if is_error:
+            _ERROR_DISPLAYED = True
+        _original_console_print(*args, **kwargs)
+
+# Monkey patch console.print
+console.print = _filtered_console_print
+
 # Helper function to standardize error handling
-def handle_errors(error_type=None, display_error=True, log_error=True):
+def handle_errors(error_type=None, log_error=True):
     """
     Decorator to handle errors in a consistent way.
     
     Args:
         error_type: If specified, exceptions will be converted to this type.
                    If None, exceptions will be re-raised as-is.
-        display_error: Whether to display errors to the console.
         log_error: Whether to log errors.
     
     Returns:
@@ -86,26 +106,30 @@ def handle_errors(error_type=None, display_error=True, log_error=True):
                 # Simply return the function's result without wrapping in a tuple
                 return func(*args, **kwargs)
             except Exception as e:
+                # Log the error if requested
                 if log_error:
                     logger.error(f"Error in {func.__name__}: {str(e)}", exc_info=True)
                 
-                if display_error:
-                    console.print(f"[red]Error: {str(e)}[/red]")
+                # NO display functionality - all display happens at CLI level
                 
                 if error_type:
-                    # Include the original exception type and traceback in the error data
-                    if hasattr(e, "__traceback__"):
-                        error_data = {
-                            "exception_type": type(e).__name__,
-                            "traceback": ''.join(traceback.format_tb(e.__traceback__))
-                        }
-                        # Add any additional error data if present
-                        if hasattr(e, "data") and isinstance(e.data, dict):
-                            error_data.update(e.data)
-                        
-                        raise error_type(str(e), error_data)
-                    else:
-                        raise error_type(str(e))
+                    # If the error is already of the target type or a subclass, don't re-wrap
+                    if isinstance(e, error_type):
+                        # Just re-raise the original error
+                        raise
+                    
+                    # Convert to the target error type
+                    # Include the original exception type
+                    error_data = {
+                        "exception_type": type(e).__name__
+                    }
+                    
+                    # Add any additional error data if present
+                    if hasattr(e, "details") and isinstance(e.details, dict):
+                        error_data.update(e.details)
+                    
+                    # Create and raise the converted error
+                    raise error_type(str(e), error_data)
                 else:
                     # Re-raise the original exception
                     raise

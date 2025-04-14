@@ -34,6 +34,13 @@ class InterfacesSettings(BaseSettings):
     overwrite: bool = False
 
 
+class PresetsSettings(BaseSettings):
+    """Interface presets settings."""
+    path: str = str(SAFESMITH_DIR / "presets")
+    index_file: str = str(SAFESMITH_DIR / "presets" / ".index.json")
+    enabled: bool = True
+
+
 class EtherscanSettings(BaseSettings):
     """Etherscan API settings."""
     api_key: str = Field(default="", env="ETHERSCAN_API_KEY")
@@ -45,6 +52,7 @@ class SafeSettings(BaseSettings):
     proposer: str = ""
     proposer_alias: str = ""
     chain_id: str = "1"  # Default to Ethereum mainnet
+    skip_broadcast_check: bool = False  # Allow skipping the vm.startBroadcast check
 
 class RpcSettings(BaseSettings):
     """RPC-related settings."""
@@ -102,30 +110,42 @@ class SafesmithSettings(BaseSettings):
     
     cache: CacheSettings = Field(default_factory=CacheSettings)
     interfaces: InterfacesSettings = Field(default_factory=InterfacesSettings)
+    presets: PresetsSettings = Field(default_factory=PresetsSettings)
     etherscan: EtherscanSettings = Field(default_factory=EtherscanSettings)
     safe: SafeSettings = Field(default_factory=SafeSettings)
     rpc: RpcSettings = Field(default_factory=RpcSettings)
     
-    model_config = SettingsConfigDict(env_prefix="SAFESMITH_", env_nested_delimiter="__")
+    model_config = SettingsConfigDict(
+        env_prefix="SAFESMITH_", 
+        env_nested_delimiter="__",
+        extra="allow"  # Allow extra fields to accommodate new settings
+    )
     
     @model_validator(mode="after")
     def ensure_directories_exist(self) -> "SafesmithSettings":
         """Ensure all required directories exist."""
         try:
-            # Use Path objects for more reliable directory creation
+            # Check all paths for potential PATH environment variable issues or excessive length
+            def fix_path_if_needed(path, default_name):
+                if ':' in path or len(path) > 255:  # Check for PATH-like string or excessive length
+                    fixed_path = str(SAFESMITH_DIR / default_name)
+                    # print(f"Warning: Invalid path detected: '{path[:50]}...' - Defaulting to {fixed_path}")
+                    return fixed_path
+                return path
+            
+            # Fix potentially problematic paths
+            self.interfaces.local_path = fix_path_if_needed(self.interfaces.local_path, "interfaces")
+            self.interfaces.global_path = fix_path_if_needed(self.interfaces.global_path, "interfaces")
+            self.presets.path = fix_path_if_needed(self.presets.path, "presets")
+            self.cache.path = fix_path_if_needed(self.cache.path, "interface-cache.json")
+            
+            # Now safely create directories with fixed paths
             Path(self.interfaces.local_path).mkdir(parents=True, exist_ok=True)
             Path(self.interfaces.global_path).mkdir(parents=True, exist_ok=True)
+            Path(self.presets.path).mkdir(parents=True, exist_ok=True)
             
-            # Fix potential PATH environment variable being used incorrectly
-            cache_path = self.cache.path
-            if ':' in cache_path or len(cache_path) > 255:  # Check for PATH-like string or excessive length
-                # This is likely an environment variable issue
-                self.cache.path = str(SAFESMITH_DIR / "interface-cache.json")
-                cache_path = self.cache.path
-                print(f"Warning: Invalid cache path detected. Defaulting to {cache_path}")
-                
-            # Make sure the parent directory exists
-            Path(cache_path).parent.mkdir(parents=True, exist_ok=True)
+            # Make sure the cache parent directory exists
+            Path(self.cache.path).parent.mkdir(parents=True, exist_ok=True)
             
         except Exception as e:
             print(f"Warning: Error ensuring directories exist: {e}")
@@ -165,6 +185,10 @@ def create_default_config(config_path: Path, is_global: bool = False) -> None:
     interfaces_dir = config_dir / "interfaces"
     interfaces_dir.mkdir(exist_ok=True)
     
+    # Create the presets directory as well
+    presets_dir = config_dir / "presets"
+    presets_dir.mkdir(exist_ok=True)
+    
     # Generate config from Pydantic defaults rather than manually specifying
     settings = SafesmithSettings()
     config_dict = {}
@@ -183,6 +207,8 @@ def create_default_config(config_path: Path, is_global: bool = False) -> None:
     if not is_global:
         config_dict["cache"].pop("path", None)
         config_dict["interfaces"].pop("global_path", None)
+        config_dict["presets"].pop("path", None)
+        config_dict["presets"].pop("index_file", None)
     
     # Write the config file
     with open(config_path, "w") as f:

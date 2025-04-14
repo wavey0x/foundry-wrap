@@ -7,6 +7,7 @@ from Foundry forge script executions.
 
 import json
 import os
+import time
 from typing import Optional, Dict, Any, NamedTuple, Tuple, List
 from pathlib import Path
 import sys
@@ -28,7 +29,7 @@ from safesmith.cast import (
     select_wallet, 
     WalletError
 )
-from safesmith.errors import handle_errors, SafeError, NetworkError, result_or_raise
+from safesmith.errors import handle_errors, SafeError, NetworkError, ScriptError, result_or_raise
 from rich.console import Console
 import time
 from eth_account import Account
@@ -79,41 +80,51 @@ class ForgeScriptRunner:
     @handle_errors(error_type=SafeError)
     async def _run_forge_script_async(self, script_path: str) -> Dict[str, Any]:
         """Run forge script asynchronously and capture output"""
-        command = [
-            "forge", "script",
-            script_path,
-            "--rpc-url", self.rpc_url,
-            "-vvv"
-        ]
+        # Disable traceback printing
+        orig_tracebacklimit = getattr(sys, 'tracebacklimit', 1000)
+        sys.tracebacklimit = 0
         
-        process: Process = await asyncio.create_subprocess_exec(
-            *command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=self.project_root
-        )
+        try:
+            command = [
+                "forge", "script",
+                script_path,
+                "--rpc-url", self.rpc_url,
+                "--slow",
+                "-vvv"
+            ]
+            
+            process: Process = await asyncio.create_subprocess_exec(
+                *command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=self.project_root
+            )
 
-        # Create tasks for streaming stdout and stderr
-        stdout_task = asyncio.create_task(self._stream_output(process.stdout))
-        stderr_task = asyncio.create_task(self._stream_output(process.stderr, is_stderr=True))
-        
-        # Wait for the process to complete and output to be streamed
-        await asyncio.gather(stdout_task, stderr_task)
-        return_code = await process.wait()
+            # Create tasks for streaming stdout and stderr
+            stdout_task = asyncio.create_task(self._stream_output(process.stdout))
+            stderr_task = asyncio.create_task(self._stream_output(process.stderr, is_stderr=True))
+            
+            # Wait for the process to complete and output to be streamed
+            await asyncio.gather(stdout_task, stderr_task)
+            return_code = await process.wait()
 
-        if return_code != 0:
-            raise SafeError(f"Forge script failed with return code {return_code}")
+            if return_code != 0:
+                raise SafeError(f"Forge script failed with return code {return_code}")
 
-        # Find and parse the latest run JSON file
-        latest_run = self._find_latest_run_json(script_path)
-        
-        if latest_run:
-            with open(latest_run) as f:
-                return json.load(f)
-        
-        raise SafeError("Could not find last run data. Make sure script is in a broadcast block.")
+            # Find and parse the latest run JSON file
+            latest_run = self._find_latest_run_json(script_path)
+            
+            if latest_run:
+                with open(latest_run) as f:
+                    return json.load(f)
+            
+            raise SafeError(
+                "Could not find last run data."
+            )
+        finally:
+            # Restore original tracebacklimit
+            sys.tracebacklimit = orig_tracebacklimit
 
-    @handle_errors(error_type=SafeError)
     def run_forge_script(self, script_path: str) -> Dict[str, Any]:
         """Runs forge script and returns json_data"""
         return asyncio.run(self._run_forge_script_async(script_path))
@@ -326,7 +337,6 @@ def submit_safe_tx(tx_json: Dict[str, Any], chain_id: str = "1") -> Dict[str, An
         response.raise_for_status()  # Now raise the exception
     return response.json()
 
-@handle_errors(error_type=SafeError)
 def process_safe_transaction(
     script_path: str,
     rpc_url: str,
@@ -337,7 +347,8 @@ def process_safe_transaction(
     proposer_alias: str = None,
     password: str = None,
     chain_id: str = "1",
-    post: bool = False
+    post: bool = False,
+    skip_broadcast_check: bool = False
 ) -> Tuple[str, Dict[str, Any]]:
     """
     Core implementation of Safe transaction processing logic.
@@ -350,46 +361,61 @@ def process_safe_transaction(
     # Run forge script
     json_data = forge_runner.run_forge_script(script_path)
     
+    # Check timestamp if skip_broadcast_check is enabled
+    if skip_broadcast_check and "timestamp" in json_data:
+        current_time = int(time.time())
+        script_time = int(json_data["timestamp"])
+        time_diff = abs(current_time - script_time)
+        
+        if time_diff > 30:
+            # Format times for display
+            from datetime import datetime
+            script_time_str = datetime.fromtimestamp(script_time).strftime('%Y-%m-%d %H:%M:%S')
+            current_time_str = datetime.fromtimestamp(current_time).strftime('%Y-%m-%d %H:%M:%S')
+            
+            console.print(f"[yellow]WARNING: Script timestamp differs significantly from current time![/yellow]")
+            console.print(f"[yellow]Script time: {script_time_str} ({script_time})[/yellow]")
+            console.print(f"[yellow]Current time: {current_time_str} ({current_time})[/yellow]")
+            console.print(f"[yellow]Difference: {time_diff} seconds[/yellow]")
+            console.print("[yellow]This could indicate the data you are attempting to post is not what you expect.[/yellow]")
+            
+            import click
+            if not click.confirm("Continue with potentially stale transaction data?", default=False):
+                raise SafeError("Transaction aborted by user due to timestamp discrepancy")
+    
     # Build Safe transaction
     safe_tx = safe_builder.build_safe_tx(nonce, json_data)
     
     # If no proposer specified, prompt for wallet selection
-    if not proposer:
-        console.print(f"\n[yellow]Please select a proposer wallet...[/yellow]")
-        try:
-            proposer_alias = select_wallet()
-            console.print(f"Selected {proposer_alias}")
-            proposer = get_proposer_address(proposer_alias, password)
-        except (WalletError, SafeError) as e:
-            raise SafeError(f"Error selecting wallet: {str(e)}")
-    elif not proposer_alias:
-        console.print(f"\n[yellow]Please select the wallet alias for your set proposer: {proposer}...[/yellow]")
-        try:
-            proposer_alias = select_wallet()
-        except WalletError as e:
-            raise SafeError(f"Error selecting wallet: {str(e)}")
-    
-    # Sign the transaction
-    signature = ""
     if post:
+        if not proposer:
+            console.print(f"\n[yellow]Please select a proposer wallet...[/yellow]")
+            try:
+                proposer_alias = select_wallet()
+                console.print(f"Selected {proposer_alias}")
+                proposer = get_proposer_address(proposer_alias, password)
+            except (WalletError, SafeError) as e:
+                raise SafeError(f"Error selecting wallet: {str(e)}")
+        elif not proposer and proposer_alias:
+            console.print(f"\n[yellow]Please select the wallet alias for your set proposer: {proposer}...[/yellow]")
+            try:
+                proposer_alias = select_wallet()
+            except WalletError as e:
+                raise SafeError(f"Error selecting wallet: {str(e)}")
+    
         signature = sign_tx(safe_tx, proposer_alias, password)
-    
-    # Create the transaction JSON
-    tx_json = safe_builder.safe_tx_to_json(proposer, safe_tx, signature=signature)
-    
-    # Format transaction hash
-    tx_hash = safe_tx.safe_tx_hash.hex()
-    
-    # Invert the logic for posting the transaction
-    if post:
-        # Submit the transaction unless dry run
-        if not signature:
-            raise SafeError("Cannot post transaction without a signature")
-        submit_safe_tx(tx_json, chain_id)
-        console.print(f"\n[green]Safe transaction created successfully![/green]")
-        console.print(f"View it here: https://app.safe.global/transactions/queue?safe={safe_address}")
+        tx_json = safe_builder.safe_tx_to_json(proposer, safe_tx, signature=signature)
+        tx_hash = safe_tx.safe_tx_hash.hex()
+        if post:
+            if not signature:
+                raise SafeError("Cannot post transaction without a signature")
+            submit_safe_tx(tx_json, chain_id)
+            console.print(f"\n[green]Safe transaction {nonce} created successfully![/green]")
+            console.print(f"View it here: https://app.safe.global/transactions/queue?safe={safe_address}")
     else:
-        console.print("[yellow]This was a dry run. To submit the transaction, use --post.[/yellow]")
+        tx_hash = None
+        tx_json = None
+        console.print("[yellow]This was a dry run. To submit the transaction use --post.[/yellow]")
         
     return tx_hash, tx_json
 
@@ -426,10 +452,9 @@ def get_chain_id_from_rpc(rpc_url: str) -> str:
     except (ValueError, KeyError) as e:
         raise NetworkError(f"Invalid response from RPC endpoint: {str(e)}")
 
-@handle_errors(error_type=SafeError)
 def run_command(script_path: str, project_dir: str = None, proposer: str = None, proposer_alias: str = None,
                 password: str = None, rpc_url: str = None, safe_address: str = None, post: bool = False,
-                nonce: int = None, chain_id: str = None) -> Tuple[str, Dict[str, Any]]:
+                nonce: int = None, chain_id: str = None, skip_broadcast_check: bool = False) -> Tuple[str, Dict[str, Any]]:
     """
     Integration function for safesmith to use safe functionality programmatically.
     Returns a tuple of (tx_hash, tx_json)
@@ -469,14 +494,15 @@ def run_command(script_path: str, project_dir: str = None, proposer: str = None,
         proposer_alias=proposer_alias,
         password=password,
         post=post,
-        chain_id=chain_id
+        chain_id=chain_id,
+        skip_broadcast_check=skip_broadcast_check
     )
 
 def generate_totp():
     """Generate a time-based one-time password for delete request authentication"""
     return int(time.time()) // 3600
 
-@handle_errors(error_type=SafeError, display_error=False, log_error=False)
+@handle_errors(error_type=SafeError, log_error=False)
 def sign_delete_request(safe_tx_hash: str, account: str, password: Optional[str] = None, safe_address: str = None, chain_id: int = 1) -> Tuple[int, str]:
     """
     Sign a delete request for a Safe transaction using EIP-712 typed data
@@ -541,7 +567,7 @@ def sign_delete_request(safe_tx_hash: str, account: str, password: Optional[str]
     
     return totp, signature
 
-@handle_errors(error_type=NetworkError, display_error=False, log_error=False)
+@handle_errors(error_type=NetworkError, log_error=False)
 def fetch_safe_transaction_by_nonce(safe_address: str, nonce: int, chain_id: int = 1) -> Optional[str]:
     """
     Fetch a Safe transaction by nonce
@@ -570,7 +596,7 @@ def fetch_safe_transaction_by_nonce(safe_address: str, nonce: int, chain_id: int
     
     return None
 
-@handle_errors(error_type=SafeError, display_error=False, log_error=False)
+@handle_errors(error_type=SafeError, log_error=False)
 def delete_safe_transaction(safe_tx_hash: str, safe_address: str, nonce: int, account: str, password: Optional[str] = None, chain_id: int = 1) -> None:
     """
     Delete a Safe transaction by nonce
@@ -621,6 +647,7 @@ def delete_safe_transaction(safe_tx_hash: str, safe_address: str, nonce: int, ac
                 status.update(f"[green]Request successful! Response code: {response.status_code}[/green]")
             else:
                 status.update(f"[yellow]Request received code: {response.status_code}[/yellow]")
+                
                 # Check for error response
                 if response.status_code >= 400:
                     error_msg = f"Failed to delete transaction: HTTP {response.status_code}"
