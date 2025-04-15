@@ -12,7 +12,7 @@ A Python wrapper for Foundry's forge scripts with dynamic interface generation a
 
 ### Using with UV (Recommended)
 
-Using safesmith with [Astral's uv](https://github.com/astral-sh/uv) is the most convenient way to run it:
+[Astral's uv](https://github.com/astral-sh/uv) is the most convenient way to install and run safesmith. You're up and running immediately with the following commands:
 
 ```bash
 # Install uv if you don't have it
@@ -20,20 +20,13 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # Run safesmith commands directly
 uvx safesmith --help
-uvx safesmith safe path/to/Script.s.sol
 ```
 
 This creates a temporary isolated environment with all dependencies installed.
 
 ### Creating a Convenient Alias
 
-You can create a shorter alias for `uvx safesmith` to make it easier to use by adding this to your `~/.bashrc` or `~/.zshrc` file:
-
-```bash
-alias ss='uvx safesmith'
-```
-
-After adding the alias, restart your terminal or run `source ~/.bashrc` (or `source ~/.zshrc` for Zsh). Now you can use the shorter `ss` command to run safesmith:
+You can create an alias for `uvx safesmith` to make it easier to call in your shell. These docs will assume an alias of `ss` has been set. For example:
 
 ```bash
 ss --help
@@ -83,7 +76,7 @@ ss config
 Populate the .toml configuration with your project's Safe information, including the Safe address, your personal address with proposer permissions, and the alias it can be loaded from from your [cast wallet](https://book.getfoundry.sh/reference/cast/cast-wallet).
 
 ```toml
-# ~/.safesmith/config.toml
+# /path/to/project/safesmith.toml
 [foundry]
 interfaces_path = "~/.safesmith/interfaces"
 rpc_url = "https://eth-mainnet.g.alchemy.com/v2/YOUR_API_KEY"
