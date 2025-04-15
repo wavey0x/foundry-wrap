@@ -27,32 +27,19 @@ This creates a temporary isolated environment with all dependencies installed.
 
 ### Creating a Convenient Alias
 
-You can create a shorter alias for `uvx safesmith` to make it easier to use:
-
-#### For Bash users:
-
-Add this to your `~/.bashrc` or `~/.bash_profile`:
+You can create a shorter alias for `uvx safesmith` to make it easier to use by adding this to your `~/.bashrc` or `~/.zshrc` file:
 
 ```bash
 alias ss='uvx safesmith'
 ```
 
-#### For Zsh users:
-
-Add this to your `~/.zshrc`:
-
-```bash
-alias ss='uvx safesmith'
-```
-
-After adding the alias, restart your terminal or run `source ~/.bashrc` (or `source ~/.zshrc` for Zsh).
-
-Now you can use the shorter `ss` command in all examples below:
+After adding the alias, restart your terminal or run `source ~/.bashrc` (or `source ~/.zshrc` for Zsh). Now you can use the shorter `ss` command to run safesmith:
 
 ```bash
 ss --help
-ss run script/MyScript.s.sol
 ```
+
+### Configuration
 
 ## Commands
 
@@ -69,17 +56,14 @@ safesmith provides several commands for working with scripts and interfaces:
 ### Common Usage Examples
 
 ```bash
-# Run a script and create a Safe transaction
+# Post Safe transaction
 ss run script/MyScript.s.sol --post
 
-# Run a script with a custom nonce
-ss run script/MyScript.s.sol --nonce 42
+# Post Safe transaction with custom nonce
+ss run script/MyScript.s.sol --nonce 42 --post
 
-# Run a script and clean up interfaces afterwards
-ss run script/MyScript.s.sol --clean
-
-# Skip the broadcast check (for scripts without vm.startBroadcast)
-ss run script/MyScript.s.sol --skip-broadcast-check
+# Delete transaction with nonce 42 from Safe queue
+ss delete 42
 
 # List all cached interfaces
 ss list
@@ -88,51 +72,15 @@ ss list
 ss sync-presets
 ```
 
-### Broadcast Block Warning
-
-When running scripts with the `--post` flag, safesmith checks if your script contains a broadcast block (`vm.startBroadcast()` and `vm.stopBroadcast()`). If not found, it will display a warning and ask for confirmation before proceeding.
-
-To suppress this warning, you can:
-
-1. Add the broadcast block to your script (recommended):
-
-   ```solidity
-   function run() public {
-       vm.startBroadcast();
-       // Your transaction code here
-       vm.stopBroadcast();
-   }
-   ```
-
-2. Use the `--skip-broadcast-check` flag:
-
-   ```bash
-   ss run script/MyScript.s.sol --post --skip-broadcast-check
-   ```
-
-3. Add it to your configuration file:
-   ```bash
-   ss config set safe.skip_broadcast_check true
-   ```
-
 ## Configuration
 
-safesmith uses a multi-level configuration system with the following priority (highest to lowest):
-
-1. Command-line arguments
-2. Environment variables (prefixed with `SAFESMITH_`)
-3. Project-local config file (`./safesmith.toml`)
-4. Global config file (`~/.safesmith/config.toml`)
-
-### Global Configuration
-
-The global configuration is created automatically on first run and stored at `~/.safesmith.config.toml`. You can view your current global configuration:
+To generate a default local configuration for a project, run the config command at your project root:
 
 ```bash
 ss config
 ```
 
-You can also edit the global config file directly:
+Populate the .toml configuration with your project's Safe information, including the Safe address, your personal address with proposer permissions, and the alias it can be loaded from from your [cast wallet](https://book.getfoundry.sh/reference/cast/cast-wallet).
 
 ```toml
 # ~/.safesmith/config.toml
@@ -143,12 +91,11 @@ rpc_url = "https://eth-mainnet.g.alchemy.com/v2/YOUR_API_KEY"
 [safe]
 safe_address = "0x1234...5678"
 safe_proposer = "0xabcd...ef01"
+proposer_alias = "my_alias_in_cast_wallet"
 chain_id = 1
 ```
 
-### Project-Local Configuration
-
-For project-specific settings, you can use the `config set` command to create or update a project-level configuration:
+You can also use the `config set` command to create or update values within your project-level configuration.
 
 ```bash
 # Set project-level configuration values
@@ -156,7 +103,20 @@ ss config set safe.safe_address 0x1234...5678
 ss config set rpc.url https://eth-mainnet.g.alchemy.com/v2/YOUR_API_KEY
 ```
 
-This will create or update a `safesmith.toml` file in your current directory.
+### Configuration Precedence
+
+safesmith uses a multi-level configuration system with the following priority (highest to lowest):
+
+1. Command-line arguments
+2. Environment variables (prefixed with `SAFESMITH_`)
+3. Project-local config file (`./safesmith.toml`)
+4. Global config file (`~/.safesmith/config.toml`)
+
+### Global Configuration
+
+The global configuration is created automatically on first run and stored at `~/.safesmith.config.toml`.
+
+You can also edit the global config file directly.
 
 ### Environment Variables
 
@@ -168,21 +128,6 @@ export SAFESMITH_WRAP_RPC__URL="https://eth-mainnet.g.alchemy.com/v2/YOUR_API_KE
 export SAFESMITH_WRAP_SAFE__SAFE_ADDRESS="0x1234...5678"
 export SAFESMITH_WRAP_SAFE__PROPOSER="0xabcd...ef01"
 ```
-
-#### Environment Variable Naming
-
-Environment variables follow this pattern:
-
-- Prefix: `SAFESMITH_`
-- Format for nested settings: `SAFESMITH_SECTION__KEY`
-- Example: `safe.proposer` becomes `SAFESMITH_SAFE__PROPOSER`
-
-#### Precedence (highest to lowest)
-
-1. **Command-line arguments** (`--safe-address`, `--rpc-url`, etc.)
-2. **Environment variables** (with `SAFESMITH_` prefix)
-3. **Project-local config** (`safesmith.toml` in project directory)
-4. **Global config** (`~/.safesmith/config.toml`)
 
 ## Interface Directives
 
