@@ -152,7 +152,7 @@ class ScriptParser:
         new_imports = [name for name in interfaces.keys() if name not in existing_imports]
         if new_imports:
             import_statements = "\n".join(
-                f'import {{{name}}} from "interfaces/{name}.sol";'
+                f'import {{{name}}} from "test/interfaces/{name}.sol";'
                 for name in new_imports
             )
             
@@ -221,7 +221,7 @@ class ScriptParser:
         content = self.script_path.read_text()
         
         # Remove import statements
-        content = re.sub(r'import "src/interfaces/.*\.sol";\n?', '', content)
+        content = re.sub(r'import "src/test/interfaces/.*\.sol";\n?', '', content)
         
         # Remove interface declarations
         content = re.sub(r'interface \w+ \{\n.*?\n\}\n?', '', content, flags=re.DOTALL)
