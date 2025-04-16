@@ -31,11 +31,8 @@ EIP1822_PROXIABLE_SLOT = Web3.keccak(text="PROXIABLE").hex()
 def get_storage_at(web3: Web3, address: str, slot: str) -> str:
     """Get storage at a specific slot for an address."""
     try:
-        result = web3.eth.get_storage_at(address, int(slot, 16)).hex()
-        console.print(f"[blue]Debug: Storage at slot {slot} for address {address}: {result}[/blue]")
-        return result
+        return web3.eth.get_storage_at(address, int(slot, 16)).hex()
     except Exception as e:
-        console.print(f"[yellow]Warning: Failed to get storage at slot {slot} for address {address}: {str(e)}[/yellow]")
         return ""
 
 def is_proxy_implementation(web3: Web3, address: str) -> bool:
@@ -97,21 +94,10 @@ def merge_abis(proxy_abi: List[Dict], impl_abi: List[Dict]) -> List[Dict]:
         if item.get("type") != "function":
             return ""
         inputs = [f"{i['type']}" for i in item.get("inputs", [])]
-        outputs = [f"{o['type']}" for o in item.get("outputs", [])]
         return f"{item['name']}({','.join(inputs)})"
     
-    # Add proxy ABI first
-    for item in proxy_abi:
-        if item.get("type") == "function":
-            signature = get_signature(item)
-            if signature and signature not in seen_signatures:
-                seen_signatures.add(signature)
-                merged_abi.append(item)
-        else:
-            merged_abi.append(item)
-    
-    # Add implementation ABI, skipping duplicates
-    for item in impl_abi:
+    # Add all functions from both ABIs, skipping duplicates
+    for item in proxy_abi + impl_abi:
         if item.get("type") == "function":
             signature = get_signature(item)
             if signature and signature not in seen_signatures:
@@ -349,7 +335,27 @@ class InterfaceManager:
             self._copy_to_local(global_file, interface_name)
             return local_file
         
-        # Generate interface using cast
+        # Initialize Web3 with the RPC URL from settings
+        web3 = Web3(Web3.HTTPProvider(self.settings.rpc.url))
+        
+        # Check if this is a proxy contract
+        impl_address = get_implementation_address(web3, address)
+        if impl_address:
+            console.print(f"[white][dim]found implementation @ {impl_address}[/dim][/white]")
+            
+            # Try to get and merge ABIs from Etherscan
+            proxy_abi = self._download_abi_from_etherscan(address)
+            impl_abi = self._download_abi_from_etherscan(impl_address)
+            
+            if proxy_abi and impl_abi:
+                # Merge the ABIs
+                merged_abi = merge_abis(json.loads(proxy_abi), json.loads(impl_abi))
+                # Create interface in both local and global directories
+                self._create_interface_from_abi(local_file, interface_name, json.dumps(merged_abi))
+                self._create_interface_from_abi(global_file, interface_name, json.dumps(merged_abi))
+                return local_file
+        
+        # If not a proxy or Etherscan download failed, try cast
         try:
             self._generate_interface(interface_name, address)
             return local_file
@@ -359,12 +365,15 @@ class InterfaceManager:
             # Fall back to downloading just the ABI from Etherscan
             abi = self._download_abi_from_etherscan(address)
             if abi:
+                # Create interface in both local and global directories
                 self._create_interface_from_abi(local_file, interface_name, abi)
+                self._create_interface_from_abi(global_file, interface_name, abi)
                 return local_file
             
             # Create a default interface if all methods fail
             console.print(f"[red]Failed to generate interface for {interface_name}[/red]")
             self._create_default_interface(local_file, interface_name)
+            self._create_default_interface(global_file, interface_name)
             return local_file
     
     @handle_errors(error_type=InterfaceError)
@@ -634,9 +643,6 @@ interface {sanitized_name} {{
         if not self.etherscan_api_key:
             console.print("[yellow]Warning: Etherscan API key not provided. Using default limited access.[/yellow]")
         
-        # Initialize Web3 with the RPC URL from settings
-        web3 = Web3(Web3.HTTPProvider(self.settings.rpc.url))
-        
         # Get the contract ABI
         url = f"https://api.etherscan.io/api?module=contract&action=getabi&address={address}&apikey={self.etherscan_api_key}"
         
@@ -652,30 +658,6 @@ interface {sanitized_name} {{
             return None
         
         # Parse the ABI
-        proxy_abi = json.loads(data["result"])
-        
-        # Check if this is a proxy contract
-        impl_address = get_implementation_address(web3, address)
-        if impl_address:
-            console.print(f"[yellow]Detected proxy contract at {address}. Implementation at {impl_address}[/yellow]")
-            
-            # Get implementation ABI
-            impl_url = f"https://api.etherscan.io/api?module=contract&action=getabi&address={impl_address}&apikey={self.etherscan_api_key}"
-            impl_response = requests.get(impl_url)
-            
-            if impl_response.status_code == 200:
-                impl_data = impl_response.json()
-                if impl_data["status"] == "1" and impl_data["message"] == "OK":
-                    impl_abi = json.loads(impl_data["result"])
-                    
-                    # Merge the ABIs
-                    merged_abi = merge_abis(proxy_abi, impl_abi)
-                    return json.dumps(merged_abi)
-                else:
-                    console.print(f"[yellow]Warning: Could not get implementation ABI: {impl_data['message']}[/yellow]")
-            else:
-                console.print(f"[yellow]Warning: Could not get implementation ABI: {impl_response.status_code}[/yellow]")
-        
         return data["result"]
 
     @handle_errors(error_type=InterfaceError)
@@ -697,6 +679,12 @@ interface {sanitized_name} {{
             f"interface {sanitized_name} {{",
         ]
         
+        # Helper function to add memory keyword where needed
+        def add_memory_keyword(type_str: str) -> str:
+            if type_str in ["string", "bytes"] or "[]" in type_str:
+                return f"{type_str} memory"
+            return type_str
+        
         # Process functions from ABI
         for item in abi:
             if item.get("type") == "function":
@@ -711,12 +699,17 @@ interface {sanitized_name} {{
                 for input_param in item.get("inputs", []):
                     param_type = input_param.get("type", "")
                     param_name = input_param.get("name", "arg")
+                    # Add memory keyword for string, bytes, and array types
+                    param_type = add_memory_keyword(param_type)
                     inputs.append(f"{param_type} {param_name}")
                 
                 # Process outputs
                 outputs = []
                 for output_param in item.get("outputs", []):
-                    outputs.append(output_param.get("type", ""))
+                    output_type = output_param.get("type", "")
+                    # Add memory keyword for string, bytes, and array types
+                    output_type = add_memory_keyword(output_type)
+                    outputs.append(output_type)
                 
                 # Determine function type
                 func_type = ""

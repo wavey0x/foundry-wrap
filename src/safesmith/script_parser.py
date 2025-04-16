@@ -136,43 +136,54 @@ class ScriptParser:
             click.echo("Updating script with interface imports")
         content = self.script_path.read_text()
         
-        # Add import statements with named imports
-        import_statements = "\n".join(
-            f'import {{{name}}} from "interfaces/{name}.sol";'
-            for name in interfaces.keys()
-        )
-        
         # Split content into lines
         lines = content.split('\n')
         
-        # Find the last import statement or contract declaration
-        last_import_idx = -1
-        contract_idx = -1
-        for i, line in enumerate(lines):
+        # Track existing imports to avoid duplicates
+        existing_imports = set()
+        for line in lines:
             if line.strip().startswith('import'):
-                last_import_idx = i
-            elif line.strip().startswith('contract'):
-                contract_idx = i
-                break
+                # Extract the interface name from the import statement
+                match = re.search(r'import\s*{\s*(\w+)\s*}\s*from', line)
+                if match:
+                    existing_imports.add(match.group(1))
         
-        # Determine where to insert the new imports
-        if last_import_idx >= 0:
-            # Insert after last import
-            insert_idx = last_import_idx + 1
-        else:
-            # Insert before contract with one empty line
-            insert_idx = contract_idx
-        
-        # Insert the imports with proper spacing
-        if last_import_idx >= 0:
-            # Add after last import
-            lines.insert(insert_idx, import_statements)
-        else:
-            # Add before contract with one empty line
-            lines.insert(insert_idx, '')
-            lines.insert(insert_idx, import_statements)
-        
-        content = '\n'.join(lines)
+        # Only add imports for interfaces that don't already exist
+        new_imports = [name for name in interfaces.keys() if name not in existing_imports]
+        if new_imports:
+            import_statements = "\n".join(
+                f'import {{{name}}} from "interfaces/{name}.sol";'
+                for name in new_imports
+            )
+            
+            # Find the last import statement or contract declaration
+            last_import_idx = -1
+            contract_idx = -1
+            for i, line in enumerate(lines):
+                if line.strip().startswith('import'):
+                    last_import_idx = i
+                elif line.strip().startswith('contract'):
+                    contract_idx = i
+                    break
+            
+            # Determine where to insert the new imports
+            if last_import_idx >= 0:
+                # Insert after last import
+                insert_idx = last_import_idx + 1
+            else:
+                # Insert before contract with one empty line
+                insert_idx = contract_idx
+            
+            # Insert the imports with proper spacing
+            if last_import_idx >= 0:
+                # Add after last import
+                lines.insert(insert_idx, import_statements)
+            else:
+                # Add before contract with one empty line
+                lines.insert(insert_idx, '')
+                lines.insert(insert_idx, import_statements)
+            
+            content = '\n'.join(lines)
         
         # Replace @ directives with actual interface names
         for interface_name in interfaces.keys():

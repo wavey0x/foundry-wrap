@@ -15,6 +15,7 @@ import requests
 
 # Known Yearn strategy proxy address
 YEARN_STRATEGY_PROXY_ADDRESS = "0xC08d81aba10f2dcBA50F9A3Efbc0988439223978"
+YEARN_STRATEGY_IMPLEMENTATION_ADDRESS = "0x254a93feff3beef9ca004e913bb5443754e8ab19"
 
 # Get environment variables or use defaults
 RPC_URL = os.getenv("RPC_URL", "https://eth.llamarpc.com")
@@ -59,16 +60,55 @@ def test_proxy_detection():
     # Get implementation address
     implementation = get_implementation_address(web3, YEARN_STRATEGY_PROXY_ADDRESS)
     assert implementation is not None, "Failed to detect proxy implementation"
+    assert implementation.lower() == YEARN_STRATEGY_IMPLEMENTATION_ADDRESS.lower(), "Incorrect implementation address"
     print(f"\nDetected implementation address: {implementation}")
 
-    # Get ABI from Etherscan
-    abi = get_abi(implementation)
-    assert abi is not None, "Failed to parse ABI"
+    # Get ABIs from both contracts
+    proxy_abi = get_abi(YEARN_STRATEGY_PROXY_ADDRESS)
+    impl_abi = get_abi(implementation)
+    
+    # Merge ABIs
+    merged_abi = merge_abis(proxy_abi, impl_abi)
+    
+    # Check for core functions from both contracts
+    function_names = [f["name"] for f in merged_abi if f["type"] == "function"]
+    
+    # Implementation functions
+    assert "asset" in function_names, "Missing asset() function"
+    assert "totalSupply" in function_names, "Missing totalSupply() function"
+    assert "totalAssets" in function_names, "Missing totalAssets() function"
+    assert "pricePerShare" in function_names, "Missing pricePerShare() function"
+    assert "balanceOf" in function_names, "Missing balanceOf() function"
+    assert "deposit" in function_names, "Missing deposit() function"
+    assert "withdraw" in function_names, "Missing withdraw() function"
+    assert "harvestAndReport" in function_names, "Missing harvestAndReport() function"
 
-    # Check for Yearn strategy specific functions
-    function_names = [f["name"] for f in abi if f["type"] == "function"]
-    assert "decimals" in function_names, "Missing decimals() function"
-    assert "apiVersion" in function_names, "Missing apiVersion() function"
+def test_interface_manager_proxy_handling():
+    """Test that InterfaceManager properly handles proxy contracts."""
+    # Create settings with RPC URL and Etherscan API key
+    settings = SafesmithSettings(
+        rpc={"url": RPC_URL},
+        etherscan={"api_key": ETHERSCAN_API_KEY}
+    )
+    
+    # Initialize InterfaceManager
+    manager = InterfaceManager(settings)
+    
+    # Process the interface
+    interface_path = manager.process_interface("YearnStrategy", YEARN_STRATEGY_PROXY_ADDRESS)
+    
+    # Read the generated interface
+    content = interface_path.read_text()
+    
+    # Check that it contains functions from both proxy and implementation
+    assert "function asset()" in content, "Missing asset() function"
+    assert "function totalSupply()" in content, "Missing totalSupply() function"
+    assert "function totalAssets()" in content, "Missing totalAssets() function"
+    assert "function pricePerShare()" in content, "Missing pricePerShare() function"
+    assert "function balanceOf(address" in content, "Missing balanceOf() function"
+    assert "function deposit(uint256" in content, "Missing deposit() function"
+    assert "function withdraw(uint256" in content, "Missing withdraw() function"
+    assert "function harvestAndReport()" in content, "Missing harvestAndReport() function"
 
 def test_proxy_abi_merging():
     """Test that we can merge proxy and implementation ABIs."""
@@ -77,6 +117,7 @@ def test_proxy_abi_merging():
     # Get implementation address
     implementation = get_implementation_address(web3, YEARN_STRATEGY_PROXY_ADDRESS)
     assert implementation is not None, "Failed to detect proxy implementation"
+    assert implementation.lower() == YEARN_STRATEGY_IMPLEMENTATION_ADDRESS.lower(), "Incorrect implementation address"
     
     # Get ABIs
     proxy_abi = get_abi(YEARN_STRATEGY_PROXY_ADDRESS)
@@ -87,8 +128,16 @@ def test_proxy_abi_merging():
     
     # Check that we have both proxy and implementation functions
     function_names = [f["name"] for f in merged_abi if f["type"] == "function"]
-    assert "decimals" in function_names, "Missing decimals() function in merged ABI"
-    assert "apiVersion" in function_names, "Missing apiVersion() function in merged ABI"
+    
+    # Implementation functions
+    assert "asset" in function_names, "Missing asset() function in merged ABI"
+    assert "totalSupply" in function_names, "Missing totalSupply() function in merged ABI"
+    assert "totalAssets" in function_names, "Missing totalAssets() function in merged ABI"
+    assert "pricePerShare" in function_names, "Missing pricePerShare() function in merged ABI"
+    assert "balanceOf" in function_names, "Missing balanceOf() function in merged ABI"
+    assert "deposit" in function_names, "Missing deposit() function in merged ABI"
+    assert "withdraw" in function_names, "Missing withdraw() function in merged ABI"
+    assert "harvestAndReport" in function_names, "Missing harvestAndReport() function in merged ABI"
 
 def test_abi_merging():
     """Test ABI merging functionality."""
@@ -114,17 +163,59 @@ def test_abi_merging():
     impl_abi = [
         {
             "type": "function",
-            "name": "decimals",
+            "name": "asset",
+            "inputs": [],
+            "outputs": [{"type": "address"}],
+            "stateMutability": "view"
+        },
+        {
+            "type": "function",
+            "name": "totalSupply",
             "inputs": [],
             "outputs": [{"type": "uint256"}],
             "stateMutability": "view"
         },
         {
             "type": "function",
-            "name": "apiVersion",
+            "name": "totalAssets",
             "inputs": [],
-            "outputs": [{"type": "string"}],
+            "outputs": [{"type": "uint256"}],
             "stateMutability": "view"
+        },
+        {
+            "type": "function",
+            "name": "pricePerShare",
+            "inputs": [],
+            "outputs": [{"type": "uint256"}],
+            "stateMutability": "view"
+        },
+        {
+            "type": "function",
+            "name": "balanceOf",
+            "inputs": [{"type": "address", "name": "account"}],
+            "outputs": [{"type": "uint256"}],
+            "stateMutability": "view"
+        },
+        {
+            "type": "function",
+            "name": "deposit",
+            "inputs": [{"type": "uint256", "name": "amount"}],
+            "outputs": [{"type": "uint256"}],
+            "stateMutability": "nonpayable"
+        },
+        {
+            "type": "function",
+            "name": "withdraw",
+            "inputs": [{"type": "uint256", "name": "amount"}],
+            "outputs": [{"type": "uint256"}],
+            "stateMutability": "nonpayable"
+        },
+        {
+            "type": "function",
+            "name": "harvestAndReport",
+            "inputs": [],
+            "outputs": [{"type": "uint256"}],
+            "stateMutability": "nonpayable"
         },
         {
             "type": "function",
@@ -140,10 +231,20 @@ def test_abi_merging():
     
     # Verify all functions are present
     function_names = [item["name"] for item in merged_abi if item.get("type") == "function"]
+    
+    # Proxy functions
     assert "implementation" in function_names
     assert "upgradeTo" in function_names
-    assert "decimals" in function_names
-    assert "apiVersion" in function_names
+    
+    # Implementation functions
+    assert "asset" in function_names
+    assert "totalSupply" in function_names
+    assert "totalAssets" in function_names
+    assert "pricePerShare" in function_names
+    assert "balanceOf" in function_names
+    assert "deposit" in function_names
+    assert "withdraw" in function_names
+    assert "harvestAndReport" in function_names
     
     # Verify no duplicates
     assert len([name for name in function_names if name == "implementation"]) == 1 
