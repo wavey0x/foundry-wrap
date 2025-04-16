@@ -16,7 +16,12 @@ dependencies = [
     "hatch>=1.13.0",
     "pydantic>=2.0.0",
     "pydantic-settings>=2.0.0",
-    "eth-account>=0.5.0"
+    "eth-account>=0.5.0",
+    "eth-utils>=2.0.0",
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.23.0",
+    "web3>=6.0.0",
+    "eth-abi==3.0.1"
 ]
 requires-python = ">=3.8"
 
@@ -32,3 +37,7 @@ packages = ["src/safesmith"]
 
 [tool.hatch.version]
 path = "src/safesmith/version.py"
+
+[tool.pytest.ini_options]
+testpaths = ["test"]
+python_files = ["test_*.py"]

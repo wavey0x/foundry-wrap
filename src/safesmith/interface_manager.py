@@ -4,19 +4,123 @@ import json
 import subprocess
 import shutil
 from pathlib import Path
-from typing import Dict, Optional, Tuple, Any, Union
+from typing import Dict, Optional, Tuple, Any, Union, List
 import requests
 import tempfile
 import re
 import importlib.resources as pkg_resources
 import os
 import sys
+from web3 import Web3
+from eth_utils import to_checksum_address
 
 from rich.console import Console
 from safesmith.settings import SafesmithSettings
 from safesmith.errors import InterfaceError, handle_errors, NetworkError
 
 console = Console()
+
+# EIP1967 storage slots
+EIP1967_IMPLEMENTATION_SLOT = Web3.keccak(text="eip1967.proxy.implementation").hex()
+EIP1967_IMPLEMENTATION_SLOT_MINUS_1 = hex(int(EIP1967_IMPLEMENTATION_SLOT, 16) - 1)
+EIP1967_BEACON_SLOT = Web3.keccak(text="eip1967.proxy.beacon").hex()
+
+# EIP1822 storage slot
+EIP1822_PROXIABLE_SLOT = Web3.keccak(text="PROXIABLE").hex()
+
+def get_storage_at(web3: Web3, address: str, slot: str) -> str:
+    """Get storage at a specific slot for an address."""
+    try:
+        result = web3.eth.get_storage_at(address, int(slot, 16)).hex()
+        console.print(f"[blue]Debug: Storage at slot {slot} for address {address}: {result}[/blue]")
+        return result
+    except Exception as e:
+        console.print(f"[yellow]Warning: Failed to get storage at slot {slot} for address {address}: {str(e)}[/yellow]")
+        return ""
+
+def is_proxy_implementation(web3: Web3, address: str) -> bool:
+    """Check if an address is a proxy implementation."""
+    # Check EIP1967 implementation slot
+    impl = get_storage_at(web3, address, EIP1967_IMPLEMENTATION_SLOT)
+    if impl and int(impl, 16) != 0:
+        return True
+        
+    # Check EIP1967 implementation slot minus 1
+    impl_minus_1 = get_storage_at(web3, address, EIP1967_IMPLEMENTATION_SLOT_MINUS_1)
+    if impl_minus_1 and int(impl_minus_1, 16) != 0:
+        return True
+        
+    # Check EIP1967 beacon slot
+    beacon = get_storage_at(web3, address, EIP1967_BEACON_SLOT)
+    if beacon and int(beacon, 16) != 0:
+        return True
+        
+    # Check EIP1822 slot
+    proxiable = get_storage_at(web3, address, EIP1822_PROXIABLE_SLOT)
+    if proxiable and int(proxiable, 16) != 0:
+        return True
+        
+    return False
+
+def get_implementation_address(web3: Web3, address: str) -> Optional[str]:
+    """Get the implementation address for a proxy contract."""
+    # Try EIP1967 implementation slot first
+    impl = get_storage_at(web3, address, EIP1967_IMPLEMENTATION_SLOT)
+    if impl and int(impl, 16) != 0:
+        return to_checksum_address("0x" + impl[-40:])
+        
+    # Try EIP1967 implementation slot minus 1
+    impl_minus_1 = get_storage_at(web3, address, EIP1967_IMPLEMENTATION_SLOT_MINUS_1)
+    if impl_minus_1 and int(impl_minus_1, 16) != 0:
+        return to_checksum_address("0x" + impl_minus_1[-40:])
+        
+    # Try EIP1967 beacon slot
+    beacon = get_storage_at(web3, address, EIP1967_BEACON_SLOT)
+    if beacon and int(beacon, 16) != 0:
+        return to_checksum_address("0x" + beacon[-40:])
+        
+    # Try EIP1822 slot
+    proxiable = get_storage_at(web3, address, EIP1822_PROXIABLE_SLOT)
+    if proxiable and int(proxiable, 16) != 0:
+        return to_checksum_address("0x" + proxiable[-40:])
+        
+    return None
+
+def merge_abis(proxy_abi: List[Dict], impl_abi: List[Dict]) -> List[Dict]:
+    """Merge proxy and implementation ABIs, removing duplicates."""
+    # Create a set of function signatures to track duplicates
+    seen_signatures = set()
+    merged_abi = []
+    
+    # Helper to create function signature
+    def get_signature(item: Dict) -> str:
+        if item.get("type") != "function":
+            return ""
+        inputs = [f"{i['type']}" for i in item.get("inputs", [])]
+        outputs = [f"{o['type']}" for o in item.get("outputs", [])]
+        return f"{item['name']}({','.join(inputs)})"
+    
+    # Add proxy ABI first
+    for item in proxy_abi:
+        if item.get("type") == "function":
+            signature = get_signature(item)
+            if signature and signature not in seen_signatures:
+                seen_signatures.add(signature)
+                merged_abi.append(item)
+        else:
+            merged_abi.append(item)
+    
+    # Add implementation ABI, skipping duplicates
+    for item in impl_abi:
+        if item.get("type") == "function":
+            signature = get_signature(item)
+            if signature and signature not in seen_signatures:
+                seen_signatures.add(signature)
+                merged_abi.append(item)
+        else:
+            merged_abi.append(item)
+    
+    return merged_abi
 
 class InterfaceManager:
     """Manages Ethereum contract interfaces for Foundry scripts."""
@@ -193,8 +297,10 @@ class InterfaceManager:
     
     def _get_interface_paths(self, interface_name: str) -> Tuple[Path, Path]:
         """Get both local and global paths for an interface."""
-        local_path = self.local_path / f"{interface_name}.sol"
-        global_path = self.global_path / f"{interface_name}.sol"
+        # Sanitize the interface name before creating paths
+        sanitized_name = self.sanitize_interface_name(interface_name)
+        local_path = self.local_path / f"{sanitized_name}.sol"
+        global_path = self.global_path / f"{sanitized_name}.sol"
         return local_path, global_path
     
     @handle_errors(error_type=InterfaceError)
@@ -274,6 +380,9 @@ class InterfaceManager:
     @handle_errors(error_type=InterfaceError)
     def _write_interface_file(self, file_path: Path, content: str, interface_name: str) -> None:
         """Write interface file with the correct interface name."""
+        # Sanitize the interface name
+        sanitized_name = self.sanitize_interface_name(interface_name)
+        
         # Ensure the directory exists
         file_path.parent.mkdir(parents=True, exist_ok=True)
         
@@ -282,10 +391,10 @@ class InterfaceManager:
         match = re.search(interface_pattern, content)
         
         if match:
-            # Replace the existing interface name with the requested one
+            # Replace the existing interface name with the sanitized one
             existing_name = match.group(1)
-            if existing_name != interface_name:
-                content = content.replace(f"interface {existing_name}", f"interface {interface_name}")
+            if existing_name != sanitized_name:
+                content = content.replace(f"interface {existing_name}", f"interface {sanitized_name}")
         
         # Write the modified content
         file_path.write_text(content)
@@ -335,10 +444,13 @@ class InterfaceManager:
     @handle_errors(error_type=InterfaceError)
     def _create_default_interface(self, file_path: Path, interface_name: str) -> None:
         """Create a default interface if download fails."""
+        # Sanitize the interface name
+        sanitized_name = self.sanitize_interface_name(interface_name)
+        
         content = f"""// SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.4;
 
-interface {interface_name} {{
+interface {sanitized_name} {{
     // Default interface with common ERC20 functions
     function balanceOf(address account) external view returns (uint256);
     function transfer(address recipient, uint256 amount) external returns (bool);
@@ -419,13 +531,15 @@ interface {interface_name} {{
     @handle_errors(error_type=InterfaceError)
     def _generate_interface(self, interface_name: str, address: str) -> None:
         """Generate a new interface using cast."""
-        local_path, global_path = self._get_interface_paths(interface_name)
+        # Sanitize the interface name before any processing
+        sanitized_name = self.sanitize_interface_name(interface_name)
+        local_path, global_path = self._get_interface_paths(sanitized_name)
         
         # Check if file exists and handle overwrite
         if global_path.exists() and not self.settings.interfaces.overwrite:
-            if not console.input(f"Interface '{interface_name}.sol' already exists globally. Overwrite? (y/N) ").lower().startswith("y"):
+            if not console.input(f"Interface '{sanitized_name}.sol' already exists globally. Overwrite? (y/N) ").lower().startswith("y"):
                 # Instead of raising an error, copy the existing interface to the local project
-                console.print(f"[yellow]Using existing interface {interface_name} from global cache[/yellow]")
+                console.print(f"[yellow]Using existing interface {sanitized_name} from global cache[/yellow]")
                 self.local_path.mkdir(parents=True, exist_ok=True)
                 local_path.write_text(global_path.read_text())
                 return
@@ -461,22 +575,21 @@ interface {interface_name} {{
         content = global_path.read_text()
         
         # Find the interface name in the generated file
-        interface_pattern = r'interface\s+(\w+)\s*{'
+        interface_pattern = r'interface\s+([A-Za-z0-9_\s]+)\s*{'
         match = re.search(interface_pattern, content)
         
         if match:
-            # Replace the generated interface name with the requested one
-            generated_name = match.group(1)
-            if generated_name != interface_name:
-                content = content.replace(f"interface {generated_name}", f"interface {interface_name}")
-                global_path.write_text(content)
+            existing_name = match.group(1).strip()
+            # Always use our sanitized name, regardless of what cast generated
+            content = content.replace(f"interface {existing_name}", f"interface {sanitized_name}")
+            global_path.write_text(content)
         
         # Copy to local path
         self.local_path.mkdir(parents=True, exist_ok=True)
         local_path.write_text(content)
         
         # Include interface name in the output message
-        console.print(f"[green]Generated interface {interface_name} for {address}[/green]")
+        console.print(f"[green]Generated interface {sanitized_name} for {address}[/green]")
 
     @handle_errors(error_type=InterfaceError)
     def _ensure_interface_file_exists(self, file_path: Path, interface_name: str) -> None:
@@ -489,13 +602,28 @@ interface {interface_name} {{
         
         content = file_path.read_text()
         
+        # Sanitize the interface name
+        sanitized_name = self.sanitize_interface_name(interface_name)
+        
         # Check if the content is actually JSON (has the content property format)
         if content.strip().startswith('{') and ('"content"' in content or '"settings"' in content):
             console.print(f"[yellow]Warning: Interface file {file_path} contains JSON data instead of Solidity.[/yellow]")
             
             # Create a default interface since we can't extract from this JSON
-            self._create_default_interface(file_path, interface_name)
+            self._create_default_interface(file_path, sanitized_name)
             console.print(f"[green]Fixed interface file {file_path}[/green]")
+            return
+            
+        # Check if the interface name in the file matches the sanitized name
+        interface_pattern = r'interface\s+([A-Za-z0-9_\s]+)\s*{'
+        match = re.search(interface_pattern, content)
+        
+        if match:
+            existing_name = match.group(1).strip()
+            if existing_name != sanitized_name:
+                # Replace the interface name in the file
+                content = content.replace(f"interface {existing_name}", f"interface {sanitized_name}")
+                file_path.write_text(content)
 
     @handle_errors(error_type=NetworkError)
     def _download_abi_from_etherscan(self, address: str) -> Optional[str]:
@@ -505,6 +633,9 @@ interface {interface_name} {{
         """
         if not self.etherscan_api_key:
             console.print("[yellow]Warning: Etherscan API key not provided. Using default limited access.[/yellow]")
+        
+        # Initialize Web3 with the RPC URL from settings
+        web3 = Web3(Web3.HTTPProvider(self.settings.rpc.url))
         
         # Get the contract ABI
         url = f"https://api.etherscan.io/api?module=contract&action=getabi&address={address}&apikey={self.etherscan_api_key}"
@@ -520,6 +651,31 @@ interface {interface_name} {{
             console.print(f"[red]Error from Etherscan API: {data['message']}[/red]")
             return None
         
+        # Parse the ABI
+        proxy_abi = json.loads(data["result"])
+        
+        # Check if this is a proxy contract
+        impl_address = get_implementation_address(web3, address)
+        if impl_address:
+            console.print(f"[yellow]Detected proxy contract at {address}. Implementation at {impl_address}[/yellow]")
+            
+            # Get implementation ABI
+            impl_url = f"https://api.etherscan.io/api?module=contract&action=getabi&address={impl_address}&apikey={self.etherscan_api_key}"
+            impl_response = requests.get(impl_url)
+            
+            if impl_response.status_code == 200:
+                impl_data = impl_response.json()
+                if impl_data["status"] == "1" and impl_data["message"] == "OK":
+                    impl_abi = json.loads(impl_data["result"])
+                    
+                    # Merge the ABIs
+                    merged_abi = merge_abis(proxy_abi, impl_abi)
+                    return json.dumps(merged_abi)
+                else:
+                    console.print(f"[yellow]Warning: Could not get implementation ABI: {impl_data['message']}[/yellow]")
+            else:
+                console.print(f"[yellow]Warning: Could not get implementation ABI: {impl_response.status_code}[/yellow]")
+        
         return data["result"]
 
     @handle_errors(error_type=InterfaceError)
@@ -530,12 +686,15 @@ interface {interface_name} {{
         import json
         abi = json.loads(abi_json)
         
+        # Sanitize the interface name
+        sanitized_name = self.sanitize_interface_name(interface_name)
+        
         # Generate Solidity interface content
         content = [
             "// SPDX-License-Identifier: MIT",
             "pragma solidity ^0.8.0;",
             "",
-            f"interface {interface_name} {{",
+            f"interface {sanitized_name} {{",
         ]
         
         # Process functions from ABI
@@ -574,35 +733,35 @@ interface {interface_name} {{
                     else:
                         returns_str = f" returns ({', '.join(outputs)})"
                 
-                func_signature = f"    function {func_name}({', '.join(inputs)}) external{func_type}{returns_str};"
-                content.append(func_signature)
-            
-            # Process events
-            elif item.get("type") == "event":
-                event_name = item.get("name", "")
-                
-                # Skip if no name
-                if not event_name:
-                    continue
-                
-                # Process inputs
-                inputs = []
-                for input_param in item.get("inputs", []):
-                    param_type = input_param.get("type", "")
-                    param_name = input_param.get("name", "arg")
-                    if input_param.get("indexed", False):
-                        inputs.append(f"{param_type} indexed {param_name}")
-                    else:
-                        inputs.append(f"{param_type} {param_name}")
-                
-                # Build the event signature
-                event_signature = f"    event {event_name}({', '.join(inputs)});"
-                content.append(event_signature)
+                # Add the function to the interface
+                content.append(f"    function {func_name}({', '.join(inputs)}) external{func_type}{returns_str};")
         
         # Close the interface
         content.append("}")
         
-        # Write to file
-        file_path.parent.mkdir(parents=True, exist_ok=True)
-        file_path.write_text("\n".join(content))
-        console.print(f"[green]Created interface {interface_name} from ABI[/green]")
+        # Write the interface file
+        final_content = "\n".join(content)
+        file_path.write_text(final_content)
+
+    def sanitize_interface_name(self, name: str) -> str:
+        """
+        Sanitize an interface name by removing spaces and special characters.
+        Ensures the name is valid for use in filenames and Solidity imports.
+        
+        Args:
+            name: The interface name to sanitize
+            
+        Returns:
+            A sanitized version of the name suitable for filenames and imports
+        """
+        # Remove spaces and special characters, keep only alphanumeric and underscores
+        sanitized = re.sub(r'[^a-zA-Z0-9_]', '', name)
+        
+        # Ensure it starts with a letter (Solidity requirement)
+        if not sanitized[0].isalpha():
+            sanitized = 'I' + sanitized
+            
+        if name != sanitized:
+            console.print(f"[yellow]Warning:[/yellow] Interface name '{name}' was sanitized to '{sanitized}'")
+        
+        return sanitized
