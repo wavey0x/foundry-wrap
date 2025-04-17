@@ -27,11 +27,24 @@ safesmith = "safesmith.cli:main"
 requires = ["hatchling>=1.13.0", "pathspec>=0.10.0"]
 build-backend = "hatchling.build"
 
+[tool.hatch.envs.test]
+dependencies = [
+  "pytest>=7.0.0",
+  "pytest-cov>=4.0.0",
+]
+
+[tool.hatch.envs.test.scripts]
+test = "pytest {args}"
+test-cov = "pytest --cov-report=term-missing --cov-config=pyproject.toml --cov=src/safesmith {args}"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/safesmith"]
 
 [tool.hatch.version]
 path = "src/safesmith/version.py"
+
+[tool.hatch.publish.index]
+repo = "pypi"
 
 [tool.pytest.ini_options]
 testpaths = ["test"]

@@ -34,46 +34,19 @@ ss --help
 
 ### Configuration
 
-## Commands
-
-safesmith provides several commands for working with scripts and interfaces:
-
-- `ss run SCRIPT`: Run a Foundry script with dynamic interface handling (alias for `safe`)
-- `ss list`: List all cached interfaces
-- `ss clear-cache`: Clear the global interface cache
-- `ss config`: Display and edit configuration
-- `ss delete NONCE`: Delete a pending Safe transaction by nonce
-- `ss process-interfaces SCRIPT`: Process interface directives in a script
-- `ss sync-presets`: Synchronize interface presets with latest from user directory
-
-### Common Usage Examples
+To initialize a new safesmith project, run the init command at your project root:
 
 ```bash
-# Post Safe transaction
-ss run script/MyScript.s.sol --post
-
-# Post Safe transaction with custom nonce
-ss run script/MyScript.s.sol --nonce 42 --post
-
-# Delete transaction with nonce 42 from Safe queue
-ss delete 42
-
-# List all cached interfaces
-ss list
-
-# Update presets when you've added new interface files
-ss sync-presets
+ss init
 ```
 
-## Configuration
+This will:
 
-To generate a default local configuration for a project, run the config command at your project root:
+1. Check if you're in a Foundry project (has `script` and `src` directories)
+2. Create a `safesmith.toml` configuration file
+3. Add `safesmith.toml` to `.gitignore` if it exists, or create one
 
-```bash
-ss config
-```
-
-Populate the .toml configuration with your project's Safe information, including the Safe address, your personal address with proposer permissions, and the alias it can be loaded from from your [cast wallet](https://book.getfoundry.sh/reference/cast/cast-wallet).
+After initialization, populate the .toml configuration with your project's Safe information, including the Safe address, your personal address with proposer permissions, and the alias it can be loaded from from your [cast wallet](https://book.getfoundry.sh/reference/cast/cast-wallet).
 
 ```toml
 # /path/to/project/safesmith.toml
@@ -120,6 +93,37 @@ All settings can be overridden with environment variables prefixed with `SAFESMI
 export SAFESMITH_WRAP_RPC__URL="https://eth-mainnet.g.alchemy.com/v2/YOUR_API_KEY"
 export SAFESMITH_WRAP_SAFE__SAFE_ADDRESS="0x1234...5678"
 export SAFESMITH_WRAP_SAFE__PROPOSER="0xabcd...ef01"
+```
+
+## Commands
+
+safesmith provides several commands for working with scripts and interfaces:
+
+- `ss run SCRIPT`: Run a Foundry script with dynamic interface handling (alias for `safe`)
+- `ss list`: List all cached interfaces
+- `ss clear-cache`: Clear the global interface cache
+- `ss config`: Display and edit configuration
+- `ss delete NONCE`: Delete a pending Safe transaction by nonce
+- `ss process-interfaces SCRIPT`: Process interface directives in a script
+- `ss sync-presets`: Synchronize interface presets with latest from user directory
+
+### Common Usage Examples
+
+```bash
+# Post Safe transaction
+ss run script/MyScript.s.sol --post
+
+# Post Safe transaction with custom nonce
+ss run script/MyScript.s.sol --nonce 42 --post
+
+# Delete transaction with nonce 42 from Safe queue
+ss delete 42
+
+# List all cached interfaces
+ss list
+
+# Update presets when you've added new interface files
+ss sync-presets
 ```
 
 ## Interface Directives
@@ -231,122 +235,4 @@ Remember to run `ss sync-presets` after adding new preset files to update the pr
 
 When you run a script with interface directives, safesmith creates:
 
-1. `interfaces/` directory in your project folder
-2. Interface files for each directive (e.g., `interfaces/IERC20.sol`)
-3. Updates your script with appropriate imports
-
-Your script is modified from:
-
-```solidity
-contract MyScript is Script {
-    @IERC20 public token = @IERC20(0x6B175474E89094C44Da98b954EedeAC495271d0F);
-    // ...
-}
-```
-
-To:
-
-```solidity
-import {IERC20} from "interfaces/IERC20.sol";
-
-contract MyScript is Script {
-    IERC20 public token = IERC20(0x6B175474E89094C44Da98b954EedeAC495271d0F);
-    // ...
-}
-```
-
-### Interface Generation and Fallbacks
-
-safesmith employs a multi-step process to generate interfaces:
-
-1. First, it checks if the interface is a known preset
-2. If not, it attempts to generate the interface using Foundry's `cast interface` command
-3. If that fails, it tries to download the ABI from Etherscan (requires `ETHERSCAN_API_KEY` for complete results)
-4. As a last resort, it creates a basic default interface with common ERC20 functions
-
-### Interface Caching
-
-Generated interfaces are cached for improved performance:
-
-- **Local cache**: `./interfaces/` in your project folder
-- **Global cache**: `~/.safesmith/interfaces/` for reuse across projects
-
-You can manage the cache with these commands:
-
-- `ss list` - List all cached interfaces
-- `ss clear-cache` - Clear the global interface cache
-
-### Complete Example
-
-Here's a comprehensive example showing various interface directives in action:
-
-```solidity
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.13;
-
-import "forge-std/Script.sol";
-
-contract SafeTransaction is Script {
-    // Using preset interfaces (no address needed)
-    @IERC20 public token;
-    @IWETH public weth;
-
-    // Using address-based interfaces
-    @UniswapRouter public router = @UniswapRouter(0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D);
-    @DAI public dai = @DAI(0x6B175474E89094C44Da98b954EedeAC495271d0F);
-
-    function run() public {
-        // Load addresses from .env
-        address tokenAddress = vm.envAddress("TOKEN_ADDRESS");
-        address wethAddress = vm.envAddress("WETH_ADDRESS");
-        address recipient = vm.envAddress("RECIPIENT");
-        uint256 amount = vm.envUint("AMOUNT");
-
-        // Initialize interfaces with addresses
-        token = @IERC20(tokenAddress);
-        weth = @IWETH(wethAddress);
-
-        // Broadcast transactions
-        vm.startBroadcast();
-
-        // Use the interfaces
-        token.approve(address(router), amount);
-
-        address[] memory path = new address[](2);
-        path[0] = address(token);
-        path[1] = address(weth);
-
-        router.swapExactTokensForETH(
-            amount,
-            0,
-            path,
-            recipient,
-            block.timestamp + 15 minutes
-        );
-
-        vm.stopBroadcast();
-    }
-}
-```
-
-When executed with safesmith:
-
-```bash
-ss run script/SafeTransaction.s.sol
-```
-
-safesmith will:
-
-1. Detect and process all four interface directives
-2. Generate/retrieve the necessary interface files
-3. Update the script with proper imports
-4. Replace all directive instances with actual interface names
-
-## Requirements
-
-- Python 3.8+
-- For Safe features: web3, safe-eth-py, and other Ethereum-related packages
-
-## License
-
-[MIT License](LICENSE)
+1. `interfaces/`

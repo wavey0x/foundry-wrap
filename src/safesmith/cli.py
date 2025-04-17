@@ -553,6 +553,48 @@ def sync_presets(ctx: click.Context, verbose: bool) -> None:
         console.print(f"[red]Error synchronizing presets: {str(e)}[/red]")
         sys.exit(1)
 
+@cli.command()
+@click.pass_context
+def init(ctx: click.Context) -> None:
+    """Initialize a new safesmith project."""
+    # Check if already initialized
+    config_path = Path("safesmith.toml")
+    if config_path.exists():
+        console.print("[red]Error:[/red] Project is already initialized with safesmith.toml")
+        sys.exit(1)
+    
+    # Check if in a foundry project
+    foundry_dirs = ["script", "src"]
+    missing_dirs = [d for d in foundry_dirs if not Path(d).exists()]
+    
+    if missing_dirs:
+        console.print(f"[yellow]Warning:[/yellow] This doesn't appear to the root level of a Foundry project")
+        if not click.confirm("Do you want to initialize anyway?", default=False):
+            console.print("[yellow]Initialization cancelled.[/yellow]")
+            sys.exit(0)
+    
+    # Create default config
+    create_default_config(config_path, is_global=False)
+    console.print(f"[green]Created project config at {config_path}[/green]")
+    
+    # Ensure safesmith.toml is in .gitignore
+    gitignore_path = Path(".gitignore")
+    if gitignore_path.exists():
+        with open(gitignore_path, "r") as f:
+            gitignore_content = f.read()
+        if "safesmith.toml" not in gitignore_content:
+            with open(gitignore_path, "a") as f:
+                f.write("\nsafesmith.toml\n")
+            console.print("[green]Added safesmith.toml to .gitignore[/green]")
+    else:
+        with open(gitignore_path, "w") as f:
+            f.write("safesmith.toml\n")
+        console.print("[green]Created .gitignore with safesmith.toml[/green]")
+    
+    console.print("\n[bold]Next steps:[/bold]")
+    console.print("1. Edit safesmith.toml with your project's Safe information")
+    console.print("2. Run `ss run script/YourScript.s.sol` to execute a script")
+
 def main():
     """Entry point for the CLI."""
     # Ensure global config exists
