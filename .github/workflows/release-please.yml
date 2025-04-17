@@ -47,8 +47,7 @@ jobs:
       - name: Build and publish
         if: ${{ steps.release.outputs.release_created }}
         env:
-          HATCH_INDEX_USER: ${{ secrets.PYPI_USERNAME }}
           HATCH_INDEX_AUTH: ${{ secrets.PYPI_API_TOKEN }}
         run: |
           hatch build
-          hatch publish
+          hatch publish --user=__token__
