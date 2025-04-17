@@ -20,6 +20,8 @@ jobs:
           release-type: python
           package-name: safesmith
           version-file: "src/safesmith/version.py"
+          default-branch: master
+          bump-minor-pre-major: true
           changelog-types: |
             [
               {"type":"feat","section":"Features","hidden":false},
